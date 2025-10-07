@@ -1,6 +1,7 @@
 site_name: BSE Docs
 site_description: Internal documentation for BSE policies, trainings, and technical guides
-site_url: https://your-org.github.io/bse-docs
+#site_url: https://Business-Systems-Engineering.github.io/bse-docs
+site_url: https://localhost:8000
 repo_url: https://github.com/Business-Systems-Engineering/Documentation
 copyright: '&copy; 2025 BSE Inc. All rights reserved. Internal use only.'
 
