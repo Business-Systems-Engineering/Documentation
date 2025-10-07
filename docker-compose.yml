@@ -12,7 +12,7 @@ services:
       - ./site:/mkdocs/site
     environment:
       - MKDOCS_PORT=8080
-      - MKDOCS_DIR=/mkdocs
+      - MKDOCS_DIR=/mkdocs/site
     # command: >
     #   sh -c "
     #     cd /mkdocs &&

@@ -61,7 +61,7 @@ COPY --chown=worker:worker entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && chmod 644 /etc/caddy/Caddyfile
 
 ENV MKDOCS_PORT=8080
-ENV MKDOCS_DIR=/docs
+ENV MKDOCS_DIR=/mkdocs/site
 
 WORKDIR ${MKDOCS_DIR}
 
