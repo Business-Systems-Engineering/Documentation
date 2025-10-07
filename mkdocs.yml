@@ -1,0 +1,53 @@
+site_name: BSE Docs
+site_description: Internal documentation for BSE policies, trainings, and technical guides
+site_url: https://your-org.github.io/bse-docs
+repo_url: https://github.com/Business-Systems-Engineering/Documentation
+copyright: '&copy; 2025 BSE Inc. All rights reserved. Internal use only.'
+
+nav:
+  - Home: index.md
+  - About: about.md
+  - Policy: policy.md
+  - Technical Guide: technical_guide.md
+
+theme:
+  name: material
+  logo: images/BSE.png  # Suggest moving logo to docs/images/ for organization
+  favicon: images/favicon.ico  # Optional: Add a small icon
+  palette:
+    - scheme: default
+      primary: indig
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search
+  # - git-revision-date-localized:
+  #     type: date
+  #     fallback_to_build_date: true
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tasklist:
+  - toc:
+      permalink: true

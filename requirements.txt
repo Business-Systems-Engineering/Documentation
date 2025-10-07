@@ -1,0 +1,13 @@
+mkdocs
+mkdocs-material
+mkdocs-minify-plugin
+#mkdocs-plugin-tags
+mkdocs-pdf-export-plugin
+mkdocs-autorefs
+mkdocs-mermaid2-plugin
+mkdocs-glightbox
+mkdocs-same-dir
+mkdocs-include-dir-to-nav
+#mkdocs-include-markdown-plugin
+mkdocs-awesome-pages-plugin
+mkdocs-git-revision-date-localized-plugin

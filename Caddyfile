@@ -1,0 +1,21 @@
+http://docs.bse.com.eg {
+# tls internal
+    log {
+        output stdout
+    }
+    encode zstd gzip
+
+    # Route everything else to mkdocs:8000
+    handle_path /* {
+        #reverse_proxy 127.0.0.1:8000
+        root * /deployment
+        file_server
+    }
+}
+http://localhost {
+# tls internal
+    log {
+        output stdout
+    }
+    encode zstd gzip
+}
