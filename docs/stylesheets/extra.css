@@ -1,0 +1,48 @@
+/* BSE brand palette
+ *
+ * Derived from the BSE logo:
+ *   - Navy  #191d57  → primary
+ *   - Orange #f2a03b → accent
+ *   - White #ffffff  → foreground on dark
+ */
+
+:root {
+  --md-primary-fg-color:        #191d57;
+  --md-primary-fg-color--light: #2a306e;
+  --md-primary-fg-color--dark:  #11153f;
+  --md-accent-fg-color:         #f2a03b;
+  --md-accent-fg-color--transparent: rgba(242, 160, 59, 0.12);
+}
+
+/* Dark scheme — softer navy so text contrast stays comfortable */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color:        #1a1f57;
+  --md-primary-fg-color--light: #2d3476;
+  --md-primary-fg-color--dark:  #0f1239;
+  --md-accent-fg-color:         #f2a03b;
+  --md-hue: 232;
+}
+
+/* Slightly tighter hero image centering on the home page */
+.md-content img[alt="Business Systems Engineering"] {
+  max-width: 180px;
+  display: block;
+  margin: 1.25rem auto 2rem;
+}
+
+/* Product table readability */
+.md-typeset table:not([class]) th {
+  background-color: var(--md-primary-fg-color);
+  color: #ffffff;
+}
+
+/* Make the "Edit this page" pencil more visible */
+.md-content__button {
+  color: var(--md-accent-fg-color);
+}
+
+/* Admonition accent tweak */
+.md-typeset .admonition,
+.md-typeset details {
+  border-left-width: 4px;
+}

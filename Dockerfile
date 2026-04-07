@@ -18,7 +18,11 @@ USER worker
 RUN pip install --user --no-cache-dir --upgrade pip && \
     pip install --user --no-cache-dir -r requirements.txt
 
-# Development 
+# Development — live-reload server for authors.
+#
+# Intended to be used with a bind-mount of the repo at /docs (see
+# docker-compose.yml). We still COPY the source in so the image is
+# usable standalone, but the mount wins at runtime.
 FROM base AS development
 
 USER worker
@@ -30,7 +34,14 @@ COPY --chown=worker:worker docs/ ./docs/
 
 EXPOSE 8000
 
-CMD ["mkdocs", "serve", "--dev-addr=0.0.0.0:8000"]
+# --dirty   : only rebuild files that changed (much faster on large repos)
+# --watch-theme : reload when the Material theme or extra_css changes
+# FORCE_COLOR : nicer log output in the terminal
+ENV FORCE_COLOR=1
+CMD ["mkdocs", "serve", \
+     "--dev-addr=0.0.0.0:8000", \
+     "--dirty", \
+     "--watch-theme"]
 
 # Builder — produces the static site inside /docs/site
 FROM base AS gh-pages-builder

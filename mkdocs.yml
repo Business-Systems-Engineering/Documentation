@@ -1,10 +1,11 @@
 site_name: BSE Docs
 site_description: Internal documentation for BSE policies, trainings, and technical guides
+site_author: Business Systems Engineering
 site_url: https://business-systems-engineering.github.io/Documentation/
 repo_url: https://github.com/Business-Systems-Engineering/Documentation
 repo_name: Business-Systems-Engineering/Documentation
 edit_uri: edit/master/docs/
-copyright: '&copy; 2025 BSE Inc. All rights reserved. Internal use only.'
+copyright: '&copy; 2007–2026 Business Systems Engineering. All rights reserved. Internal use only.'
 
 # TODO(you): Adjust the top-level ordering to match how you want readers to
 # encounter this content. The framework section is the bulk of the docs, so
@@ -46,36 +47,89 @@ not_in_nav: |
 
 theme:
   name: material
+  language: en
   logo: images/BSE.png
-  favicon: images/favicon.ico
+  favicon: images/BSE.png
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+    view: material/eye
+    admonition:
+      note: material/note-text
+      tip: material/lightbulb-on
+      warning: material/alert
+      danger: material/fire
   palette:
-    - scheme: default
-      primary: indigo
-      accent: indigo
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-night
         name: Switch to dark mode
-    - scheme: slate
-      primary: indigo
-      accent: indigo
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-sunny
         name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
   features:
+    - announce.dismiss
     - navigation.instant
+    - navigation.instant.progress
     - navigation.tracking
     - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
     - navigation.indexes
     - navigation.top
+    - navigation.footer
     - toc.follow
     - search.suggest
     - search.highlight
+    - search.share
     - content.code.copy
+    - content.code.annotate
     - content.action.edit
+    - content.action.view
+    - content.tooltips
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Business-Systems-Engineering
+      name: BSE on GitHub
+    - icon: fontawesome/brands/linkedin
+      link: https://linkedin.com/company/bse-erp?utm_source=docs&utm_medium=docs-site&utm_campaign=bse-documentation
+      name: BSE on LinkedIn
+    - icon: fontawesome/brands/x-twitter
+      link: https://x.com/BseErpeg?utm_source=docs&utm_medium=docs-site&utm_campaign=bse-documentation
+      name: BSE on X
+    - icon: fontawesome/brands/facebook
+      link: https://facebook.com/bseerpeg?utm_source=docs&utm_medium=docs-site&utm_campaign=bse-documentation
+      name: BSE on Facebook
+    - icon: fontawesome/brands/instagram
+      link: https://instagram.com/bseerpeg?utm_source=docs&utm_medium=docs-site&utm_campaign=bse-documentation
+      name: BSE on Instagram
+    - icon: fontawesome/brands/youtube
+      link: https://www.youtube.com/@BSE_Systems?utm_source=docs&utm_medium=docs-site&utm_campaign=bse-documentation
+      name: BSE on YouTube
+    - icon: fontawesome/solid/globe
+      link: https://bse.com.eg/?utm_source=docs&utm_medium=docs-site&utm_campaign=bse-documentation&utm_content=footer
+      name: bse.com.eg
+  generator: false
 
 plugins:
-  - search
+  - search:
+      lang: en
+      separator: '[\s\-\.\_]+'
   # - git-revision-date-localized:
   #     type: date
   #     fallback_to_build_date: true
@@ -85,18 +139,41 @@ markdown_extensions:
   - admonition
   - attr_list
   - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      permalink_title: Anchor link to this section
   - pymdownx.arithmatex:
       generic: true
   - pymdownx.betterem:
       smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
   - pymdownx.emoji:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.snippets
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
           class: mermaid
           format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
   - pymdownx.tasklist:
-  - toc:
-      permalink: true
+      custom_checkbox: true
+  - pymdownx.tilde
+
+watch:
+  - docs
+  - mkdocs.yml

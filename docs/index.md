@@ -2,38 +2,47 @@
 title: Home
 ---
 
-# Welcome to BSE Business Systems Engineering
+# BSE Documentation
 
-Information systems are one of the most important aspects of investment for business establishments. Information systems provide information and tools to contribute to development by maximizing the use of its resources and reducing waste.
+<p align="center">
+  <img src="images/BSE.png" alt="Business Systems Engineering" width="180">
+</p>
 
-## Our Services
+Welcome to the internal documentation portal for **Business Systems Engineering (BSE)** — a leading Egyptian software development company specializing in ERP systems, e-invoicing, and custom software solutions since **2007**.
 
-Explore our integrated ERP solutions, all supporting Tax Invoice and available on Cloud or customer server:
+This site is the single source of truth for BSE engineering policies, trainings, and technical guides. For our public-facing products and services, visit [**bse.com.eg**](https://bse.com.eg/?utm_source=docs&utm_medium=docs-site&utm_campaign=bse-documentation).
 
-- **Safe Pack**: A general purpose, integrated Web ERP Solution.
-- **Safe Batch**: A sophisticated, integrated Web ERP Solution.
-- **Safe Orange**: Specialized for purchase management of vegetables and fruits.
-- **Safe RS**: Real estates management system, covering rental and sales transactions.
-- **Safe Block**: Cement blocks and readymade concrete production and supply system.
-- **Safe PMS**: Full cycle Project management system.
-- **Safe Kids**: Cloud member management system for nurseries and hostels.
-- **Safe University**: System for universities, colleges, and institutes.
+## What you'll find here
 
-## What We Provide
+- **[About BSE](about.md)** — Company overview, vision, mission, and how to reach us.
+- **[Policy](policy.md)** — Internal engineering, data-handling, and documentation policies.
+- **[Technical Guide](technical_guide.md)** — Implementation methodology, platform specifications, and best practices.
+- **[Framework](framework/index.md)** — Architecture decision records (ADRs), RFCs, and delivery plans for `Bse.Framework`, our modular .NET framework.
 
-- 100% Integrated business Solution
-- 95% Customized and expandable solution
-- 100% Customer service and after sale support
-- 95% Drive your company growth
+## Our Product Suite
 
-## Partners
+BSE builds integrated, tax-invoice-ready ERP solutions deployed on the cloud or on customer infrastructure:
 
-Our trusted partners include leading organizations (logos available in site assets).
+| Product | Purpose |
+|---|---|
+| **Safe Pack** | General-purpose integrated Web ERP |
+| **Safe Batch** | Sophisticated integrated Web ERP |
+| **Safe Orange** | Purchase management for fruits & vegetables |
+| **Safe RS** | Real-estate rental & sales management |
+| **Safe Block** | Cement block and ready-mix concrete production |
+| **Safe PMS** | Full-cycle project management |
+| **Safe Kids** | Member management for nurseries and hostels |
+| **Safe University** | Management for universities, colleges, and institutes |
 
-## Testimonials
+Learn more at [bse.com.eg](https://bse.com.eg/?utm_source=docs&utm_medium=docs-site&utm_campaign=bse-documentation&utm_content=products).
 
-The satisfaction of our customers is the standard of our success.
+## What we offer
 
-- "Praise for software solutions and support." – أمير عبد المتعال محمد احمد, Financial Manager, Riyadh.
-- "Excellent professionalism." – اسامة ابوالقاسم, CEO of Operations, Absar.
-- And more from satisfied clients.
+- **100%** integrated business solutions
+- **95%** customizable and expandable
+- **100%** post-sale customer service and support
+- Proven track record driving measurable company growth
+
+---
+
+**For inquiries or support:** [info@bse.com.eg](mailto:info@bse.com.eg) · [+20 111 382 2999](tel:+201113822999) · [bse.com.eg/contact](https://bse.com.eg/?utm_source=docs&utm_medium=docs-site&utm_campaign=bse-documentation&utm_content=contact)

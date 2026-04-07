@@ -1,26 +1,44 @@
 services:
+  # Live-reload authoring environment.
+  #
+  # Run with:  docker compose up mkdocs-dev
+  # Visit:     http://localhost:8000
+  #
+  # Bind-mounts the docs/ directory and mkdocs.yml so edits on the host
+  # trigger live reload inside the container. `--dirty` (set in the
+  # Dockerfile CMD) keeps rebuilds fast on repos with lots of pages.
   mkdocs-dev:
     build:
       context: .
       dockerfile: Dockerfile
       target: development
+    container_name: bse-docs-dev
     ports:
       - "8000:8000"
     volumes:
       - ./mkdocs.yml:/docs/mkdocs.yml:ro
       - ./docs:/docs/docs
-    # The development container uses `mkdocs serve` with --dev-addr for hot-reloading
+    environment:
+      # Polling-based file watching is more reliable than inotify inside
+      # Docker Desktop on macOS/Windows where bind-mount events can be
+      # dropped. Safe to leave on everywhere.
+      - WATCHFILES_FORCE_POLLING=true
+    restart: unless-stopped
 
+  # Production parity — builds the full site and serves it via Caddy,
+  # matching what CI will eventually publish.
+  #
+  # Run with:  docker compose up mkdocs-prod
+  # Visit:     http://localhost:8080
   mkdocs-prod:
     build:
       context: .
       dockerfile: Dockerfile
       target: runtime
+    container_name: bse-docs-prod
     ports:
       - "8080:8080"
-    volumes:
-      - ./site:/docs/site
     environment:
       - MKDOCS_PORT=8080
       - MKDOCS_DIR=/docs/site
-    # The production-like container uses Caddy to serve the pre-built site
+    restart: unless-stopped
