@@ -1,0 +1,26 @@
+services:
+  mkdocs-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./mkdocs.yml:/docs/mkdocs.yml:ro
+      - ./docs:/docs/docs
+    # The development container uses `mkdocs serve` with --dev-addr for hot-reloading
+
+  mkdocs-prod:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./site:/docs/site
+    environment:
+      - MKDOCS_PORT=8080
+      - MKDOCS_DIR=/docs/site
+    # The production-like container uses Caddy to serve the pre-built site

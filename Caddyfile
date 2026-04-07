@@ -1,0 +1,12 @@
+# http://docs.bse.com.eg {
+:8080 {
+    log {
+        output stdout
+    }
+    encode zstd gzip
+
+    handle_path /* {
+        root * /docs/site
+        file_server
+    }
+}
