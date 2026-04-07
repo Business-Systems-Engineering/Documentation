@@ -2,7 +2,7 @@ name: Deploy MkDocs to GitHub Pages
 
 on:
   push:
-    branches: [ main ]
+    branches: [ master ]
   workflow_dispatch:
 
 permissions:
@@ -28,9 +28,8 @@ jobs:
       - name: Build MkDocs Site with Docker
         run: |
           docker buildx build \
-            --target builder \
+            --target gh-pages-export \
             --output type=local,dest=./site \
-            --load \
             .
 
       - name: Setup Pages

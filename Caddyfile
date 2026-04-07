@@ -6,7 +6,7 @@
     encode zstd gzip
 
     handle_path /* {
-        root * /mkdocs/site
+        root * /docs/site
         file_server
     }
 }

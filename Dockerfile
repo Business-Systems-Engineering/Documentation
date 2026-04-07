@@ -32,7 +32,7 @@ EXPOSE 8000
 
 CMD ["mkdocs", "serve", "--dev-addr=0.0.0.0:8000"]
 
-# Builder
+# Builder — produces the static site inside /docs/site
 FROM base AS gh-pages-builder
 
 USER worker
@@ -42,7 +42,13 @@ WORKDIR /docs
 COPY --chown=worker:worker mkdocs.yml .
 COPY --chown=worker:worker docs/ ./docs/
 
-RUN mkdocs build --strict --site-dir site
+RUN mkdocs build --strict --site-dir /home/worker/site
+
+# Export stage — a scratch image containing ONLY the built site at the
+# filesystem root. Used by CI with `docker buildx build --output type=local`
+# so the exported tree is exactly the site contents, not the whole builder fs.
+FROM scratch AS gh-pages-export
+COPY --from=gh-pages-builder /home/worker/site/ /
 
 # Runtime
 FROM debian:bookworm-slim AS runtime
@@ -60,7 +66,7 @@ RUN groupadd --gid 1000 worker && \
     mkdir -p /docs/site /var/log/caddy && \
     chown -R worker:worker /docs /var/log/caddy
 
-COPY --from=gh-pages-builder --chown=worker:worker /docs/site /docs/site
+COPY --from=gh-pages-builder --chown=worker:worker /home/worker/site /docs/site
 
 COPY Caddyfile /etc/caddy/Caddyfile
 
