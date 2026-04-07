@@ -1,0 +1,8 @@
+title: RFCs
+order: asc
+sort_type: natural
+nav:
+  # Glob picks up only the numbered RFCs (0001-, 0002-, …) so adding a new
+  # one is just a matter of dropping a file with a numeric prefix here.
+  # template.md is intentionally not matched.
+  - "... | [0-9]*.md"

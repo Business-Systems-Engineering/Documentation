@@ -7,43 +7,11 @@ repo_name: Business-Systems-Engineering/Documentation
 edit_uri: edit/master/docs/
 copyright: '&copy; 2007–2026 Business Systems Engineering. All rights reserved. Internal use only.'
 
-# TODO(you): Adjust the top-level ordering to match how you want readers to
-# encounter this content. The framework section is the bulk of the docs, so
-# consider whether readers land on Home → About → Policy → Framework, or
-# whether Framework should come first for engineers. Reorder the entries
-# under `nav:` below to express that choice.
-nav:
-  - Home: index.md
-  - About: about.md
-  - Policy: policy.md
-  - Technical Guide: technical_guide.md
-  - Framework:
-    - Overview: framework/index.md
-    - RFCs:
-      - Framework Overview: framework/rfc/0001-framework-overview.md
-      - RPC & Distributed Computing: framework/rfc/0002-rpc-distributed-computing.md
-      - Data Access Layer: framework/rfc/0003-data-access-layer.md
-      - Auth & Security: framework/rfc/0004-auth-and-security.md
-      - Telemetry & Observability: framework/rfc/0005-telemetry-and-observability.md
-      - Multi-Tenancy: framework/rfc/0006-multi-tenancy.md
-      - Localization: framework/rfc/0007-localization.md
-    - ADRs:
-      - 0001 — Modular Package Architecture: framework/adr/0001-modular-package-architecture.md
-      - 0002 — JSON-RPC over Redis Streams: framework/adr/0002-json-rpc-over-redis-streams.md
-      - 0003 — EF Core + Dapper Hybrid: framework/adr/0003-ef-core-plus-dapper-hybrid.md
-      - 0004 — Hybrid Auth (JWT + Opaque): framework/adr/0004-hybrid-auth-jwt-plus-opaque.md
-      - 0005 — OpenTelemetry + Grafana: framework/adr/0005-opentelemetry-grafana-stack.md
-      - 0006 — Hybrid Multi-Tenancy: framework/adr/0006-hybrid-multi-tenancy.md
-      - 0007 — Calendar Provider Abstraction: framework/adr/0007-calendar-provider-abstraction.md
-      - 0008 — Source Generator Automation: framework/adr/0008-source-generator-automation.md
-      - 0009 — Transport Abstraction Pattern: framework/adr/0009-transport-abstraction-pattern.md
-    - Plans:
-      - 2026-04-06 — BSE Framework Core: framework/plans/2026-04-06-bse-framework-core.md
-
-# Files intentionally excluded from nav (not broken links — just not for readers)
-not_in_nav: |
-  framework/adr/template.md
-  framework/rfc/template.md
+# Navigation is auto-discovered by the awesome-pages plugin from the
+# directory layout under docs/. Per-directory `.pages` files set the
+# section title, ordering, and which files to hide. To add a new page,
+# create the .md file in the right docs/ subdirectory and (if needed)
+# update the matching .pages file. No edits here required.
 
 theme:
   name: material
@@ -127,6 +95,11 @@ extra:
   generator: false
 
 plugins:
+  # awesome-pages must run before any other nav-affecting plugin so the
+  # auto-discovered structure is what other plugins see.
+  - awesome-pages:
+      collapse_single_pages: false
+      strict: true
   - search:
       lang: en
       separator: '[\s\-\.\_]+'

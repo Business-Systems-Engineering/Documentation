@@ -1,0 +1,6 @@
+nav:
+  - Home: index.md
+  - About: about.md
+  - Policy: policy.md
+  - Technical Guide: technical_guide.md
+  - Framework: framework
