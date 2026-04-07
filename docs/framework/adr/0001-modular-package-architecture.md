@@ -28,7 +28,7 @@ Build the framework as a set of focused NuGet packages following the **modular m
 
 ## Rationale
 
-Approach A matches the patterns already used in Myriad and caaspay-core (library frameworks, not scaffolding tools). It enables incremental migration: SafePack2 can adopt only `Bse.Framework.Auth` first to replace DES encryption, then progressively adopt more packages. Source generators give us the automation benefits of Approach C without the drift problem. Approach B can be built ON TOP of Approach A later as a convenience layer.
+Approach A (library frameworks, not scaffolding tools) enables incremental migration: SafePack2 can adopt only `Bse.Framework.Auth` first to replace DES encryption, then progressively adopt more packages. Source generators give us the automation benefits of Approach C without the drift problem. Approach B can be built ON TOP of Approach A later as a convenience layer.
 
 ## Consequences
 

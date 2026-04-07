@@ -6,12 +6,7 @@
 
 ## Context
 
-The framework must support distributed computing across services. The team has prior experience with three distributed computing frameworks:
-- **perl-Myriad:** Custom RPC over Redis Streams with consumer groups
-- **caaspay-core (Go):** Custom RPC over Redis Streams with reflection-based registration
-- **python-jsonrpc-framework:** JSON-RPC 2.0 over HTTP with FastAPI and OpenTelemetry
-
-The existing BSE apps have NO inter-service communication today (monolithic Web API 2). We need a transport that supports horizontal scaling, background job processing, service-to-service communication, and external client APIs.
+The framework must support distributed computing across services. The existing BSE apps have NO inter-service communication today (monolithic Web API 2). We need a transport that supports horizontal scaling, background job processing, service-to-service communication, and external client APIs.
 
 ## Decision
 
@@ -57,8 +52,5 @@ Consistency wins. The team already knows JSON-RPC 2.0 from the Python framework.
 ## References
 
 - JSON-RPC 2.0 Specification: https://www.jsonrpc.org/specification
-- perl-Myriad framework
-- caaspay-core framework
-- python-jsonrpc-framework
 - ADR-0009: Transport Abstraction Pattern
 - RFC-0002: RPC & Distributed Computing

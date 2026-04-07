@@ -7,7 +7,7 @@
 
 ## Abstract
 
-The framework provides distributed computing via JSON-RPC 2.0 over a transport abstraction supporting Redis Streams (primary), HTTP, and In-Memory implementations. Services declare RPC methods, event emitters, and event receivers via attributes; source generators produce dispatch code at compile time. The design draws from perl-Myriad (transport abstraction), caaspay-core (Redis Streams patterns, reflection-based registration, DLQ), and python-jsonrpc-framework (JSON-RPC 2.0 spec compliance, OpenTelemetry integration).
+The framework provides distributed computing via JSON-RPC 2.0 over a transport abstraction supporting Redis Streams (primary), HTTP, and In-Memory implementations. Services declare RPC methods, event emitters, and event receivers via attributes; source generators produce dispatch code at compile time.
 
 ## Motivation
 
@@ -155,8 +155,6 @@ Implementations:
 - `InMemoryTransport` — for testing, faithfully simulates Redis semantics
 
 ### Stream Naming Convention
-
-Inherited from caaspay-core:
 
 ```
 rpc:{service}:{method}              → RPC request streams
@@ -429,6 +427,5 @@ Existing BSE apps:
 
 - ADR-0002, ADR-0009
 - JSON-RPC 2.0 spec
-- perl-Myriad, caaspay-core, python-jsonrpc-framework
 - MassTransit, Wolverine, Rebus design patterns
 - OpenTelemetry semantic conventions

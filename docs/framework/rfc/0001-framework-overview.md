@@ -213,4 +213,3 @@ The framework supports incremental migration from existing BSE apps:
 - All ADRs (0001-0009)
 - All RFCs (0002-0007)
 - Existing apps: Stud2, SafePack2, Orange2
-- Reference frameworks: perl-Myriad, caaspay-core, python-jsonrpc-framework
