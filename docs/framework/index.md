@@ -164,8 +164,3 @@ The framework design draws on these existing systems:
 - **SafePack2** — Inventory/ERP system (.NET FW 4.6.1)
 - **Orange2** — Accounting/ERP system (.NET FW 4.6.1)
 - **notifyd** — Go notification service (existing reference)
-
-### Team's Prior Work
-- **perl-Myriad** — Async microservice framework with RPC over Redis Streams
-- **caaspay-core** — Go microservice framework with reflection-based registration
-- **python-jsonrpc-framework** — JSON-RPC 2.0 over HTTP with FastAPI
