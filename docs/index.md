@@ -17,6 +17,7 @@ This site is the single source of truth for BSE engineering policies, trainings,
 - **[About BSE](about.md)** — Company overview, vision, mission, and how to reach us.
 - **[Policy](policy.md)** — Internal engineering, data-handling, and documentation policies.
 - **[Technical Guide](technical_guide.md)** — Implementation methodology, platform specifications, and best practices.
+- **[Workflows](workflows/index.md)** — Step-by-step guides for recurring processes like managing website content, onboarding, and more.
 - **[Framework](framework/index.md)** — Architecture decision records (ADRs), RFCs, and delivery plans for `Bse.Framework`, our modular .NET framework.
 
 ## Our Product Suite

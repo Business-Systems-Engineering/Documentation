@@ -3,4 +3,5 @@ nav:
   - About: about.md
   - Policy: policy.md
   - Technical Guide: technical_guide.md
+  - Workflows: workflows
   - Framework: framework
