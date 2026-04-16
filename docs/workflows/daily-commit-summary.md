@@ -8,13 +8,18 @@ This workflow generates a summary of all commits pushed to BSE GitHub repositori
 
 ---
 
+!!! info "Where the script lives"
+    The script is part of the **[`Business-Systems-Engineering/DevUtiles`](https://github.com/Business-Systems-Engineering/DevUtiles)** repo — BSE's shared developer utilities. Clone it once and pull updates periodically.
+
 ## Quick reference
+
+Assumes you've cloned DevUtiles to `~/Projects/bse/DevUtiles` (or equivalent on Windows).
 
 | I want to… | Command |
 |---|---|
-| See today's commits | `./scripts/daily-summary.sh` |
-| See a specific date | `./scripts/daily-summary.sh 2026-04-14` |
-| See the last 7 days | `./scripts/daily-summary.sh week` |
+| See today's commits | `./daily-summary.sh` |
+| See a specific date | `./daily-summary.sh 2026-04-14` |
+| See the last 7 days | `./daily-summary.sh week` |
 
 ---
 
@@ -24,6 +29,66 @@ This workflow generates a summary of all commits pushed to BSE GitHub repositori
 - [x] **Authenticated** — run `gh auth login` once and follow the prompts
 - [x] **jq** installed — comes with most Linux distros; on macOS: `brew install jq`; on Windows: `choco install jq` or `winget install jqlang.jq`
 - [x] **Access** to the `Business-Systems-Engineering` GitHub org
+- [x] **DevUtiles cloned locally** — see [Initial setup](#initial-setup) below
+
+---
+
+## Initial setup
+
+One-time setup per machine:
+
+=== "Linux / macOS"
+
+    ```bash
+    mkdir -p ~/Projects/bse && cd ~/Projects/bse
+    git clone git@github.com:Business-Systems-Engineering/DevUtiles.git
+    chmod +x DevUtiles/daily-summary.sh
+    ```
+
+=== "Windows (Git Bash)"
+
+    ```bash
+    mkdir -p /c/Projects/bse && cd /c/Projects/bse
+    git clone git@github.com:Business-Systems-Engineering/DevUtiles.git
+    ```
+
+=== "Windows (PowerShell)"
+
+    ```powershell
+    mkdir C:\Projects\bse -Force
+    cd C:\Projects\bse
+    git clone git@github.com:Business-Systems-Engineering/DevUtiles.git
+    ```
+
+### Keeping it up to date
+
+Run this occasionally (or add it as a git hook / scheduled task):
+
+```bash
+cd ~/Projects/bse/DevUtiles && git pull
+```
+
+### Optional — add to PATH
+
+If you use the script daily, add DevUtiles to your `PATH` so you can run `daily-summary.sh` from anywhere:
+
+=== "Linux / macOS (bash/zsh)"
+
+    ```bash
+    echo 'export PATH="$HOME/Projects/bse/DevUtiles:$PATH"' >> ~/.zshrc  # or ~/.bashrc
+    source ~/.zshrc
+    ```
+
+=== "Windows (PowerShell)"
+
+    ```powershell
+    [Environment]::SetEnvironmentVariable(
+      'Path',
+      [Environment]::GetEnvironmentVariable('Path', 'User') + ';C:\Projects\bse\DevUtiles',
+      'User'
+    )
+    # Restart your terminal for the change to take effect
+    ```
 
 ---
 
@@ -61,18 +126,18 @@ flowchart LR
 Git for Windows ships with Git Bash, which runs bash scripts natively.
 
 1. Open **Git Bash** (installed with [Git for Windows](https://git-scm.com/download/win)).
-2. Navigate to the Documentation repo:
+2. Navigate to the DevUtiles repo:
    ```bash
-   cd /c/Projects/bse/Documentation
+   cd /c/Projects/bse/DevUtiles
    ```
 3. Run the script:
    ```bash
-   ./scripts/daily-summary.sh
+   ./daily-summary.sh
    ```
 
 ### Option B — PowerShell (without the script)
 
-If you prefer not to use bash, run the equivalent `gh` command directly in PowerShell:
+If you prefer not to use bash, run the equivalent `gh` command directly in PowerShell — no clone needed:
 
 ```powershell
 # Today's commits
@@ -90,8 +155,8 @@ gh api search/commits -X GET `
 sudo apt install gh
 gh auth login
 
-cd /mnt/c/Projects/bse/Documentation
-./scripts/daily-summary.sh
+cd /mnt/c/Projects/bse/DevUtiles
+./daily-summary.sh
 ```
 
 ---
@@ -99,10 +164,10 @@ cd /mnt/c/Projects/bse/Documentation
 ## Running on Linux / macOS
 
 ```bash
-cd ~/Projects/bse/Documentation
-./scripts/daily-summary.sh          # today
-./scripts/daily-summary.sh week     # last 7 days
-./scripts/daily-summary.sh 2026-04-12  # specific date
+cd ~/Projects/bse/DevUtiles
+./daily-summary.sh          # today
+./daily-summary.sh week     # last 7 days
+./daily-summary.sh 2026-04-12  # specific date
 ```
 
 ---
@@ -176,3 +241,5 @@ For the summary to be useful, commit messages need to be descriptive. BSE follow
 | No commits shown but you pushed today | API index delay | Wait 1–2 minutes; GitHub indexes commits asynchronously |
 | TLS handshake timeout | Network issue | Check VPN/proxy settings; retry |
 | Only 100 commits shown | API page limit | The script fetches one page of 100; for busier orgs, extend with `--paginate` |
+| `./daily-summary.sh: No such file or directory` | Running from the wrong directory | `cd` into the DevUtiles repo first, or add it to your `PATH` |
+| Script runs but behavior seems old | Local clone is stale | Run `git pull` inside the DevUtiles repo |

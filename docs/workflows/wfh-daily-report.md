@@ -79,19 +79,21 @@ Git Bash comes pre-installed with [Git for Windows](https://git-scm.com/download
     - Select **GitHub.com** → **HTTPS** → **Login with a web browser**.
     - Follow the prompts to complete authentication.
 
-5. **Clone the Documentation repo** (if not already cloned):
+5. **Clone the DevUtiles repo** (if not already cloned):
     ```bash
     cd /c/Projects/bse
-    git clone git@github.com:Business-Systems-Engineering/Documentation.git
+    git clone git@github.com:Business-Systems-Engineering/DevUtiles.git
     ```
+
+    See [Daily Commit Summary → Initial setup](daily-commit-summary.md#initial-setup) for Linux/macOS paths and an optional "add to PATH" step.
 
 **Daily usage:**
 
 1. Open **Git Bash** (search "Git Bash" in the Start menu).
 2. Run:
     ```bash
-    cd /c/Projects/bse/Documentation
-    ./scripts/daily-summary.sh
+    cd /c/Projects/bse/DevUtiles
+    ./daily-summary.sh
     ```
 3. The summary prints to your terminal. Select all text (++ctrl+a++) and copy (right-click → Copy, or ++ctrl+ins++).
 4. Paste into the agreed reporting channel.
@@ -141,8 +143,8 @@ Write-Host "==========================================" -ForegroundColor Cyan
 sudo apt update && sudo apt install -y gh jq
 gh auth login
 
-cd /mnt/c/Projects/bse/Documentation
-./scripts/daily-summary.sh
+cd /mnt/c/Projects/bse/DevUtiles
+./daily-summary.sh
 ```
 
 ---
@@ -154,13 +156,14 @@ cd /mnt/c/Projects/bse/Documentation
 sudo apt install -y gh jq
 gh auth login
 
-# Clone if needed
+# Clone DevUtiles if needed
 cd ~/Projects/bse
-git clone git@github.com:Business-Systems-Engineering/Documentation.git
+git clone git@github.com:Business-Systems-Engineering/DevUtiles.git
+chmod +x DevUtiles/daily-summary.sh
 
 # Daily usage
-cd ~/Projects/bse/Documentation
-./scripts/daily-summary.sh
+cd ~/Projects/bse/DevUtiles
+./daily-summary.sh
 ```
 
 ---
@@ -172,9 +175,14 @@ cd ~/Projects/bse/Documentation
 brew install gh jq
 gh auth login
 
+# Clone DevUtiles if needed
+cd ~/Projects/bse
+git clone git@github.com:Business-Systems-Engineering/DevUtiles.git
+chmod +x DevUtiles/daily-summary.sh
+
 # Daily usage
-cd ~/Projects/bse/Documentation
-./scripts/daily-summary.sh
+cd ~/Projects/bse/DevUtiles
+./daily-summary.sh
 ```
 
 ---
@@ -234,7 +242,7 @@ Use this checklist every WFH day before 6 PM:
 
 - [ ] All work committed with descriptive messages
 - [ ] All commits pushed to GitHub
-- [ ] Run `./scripts/daily-summary.sh` (or PowerShell equivalent)
+- [ ] Run `./daily-summary.sh` from the DevUtiles repo (or the PowerShell equivalent)
 - [ ] Copy output and send to the agreed channel
 - [ ] If no commits: write a brief text summary instead
 
@@ -249,5 +257,6 @@ Use this checklist every WFH day before 6 PM:
 | Script shows no commits but you pushed today | GitHub indexes commits asynchronously — wait 1–2 minutes and retry |
 | Commits show under wrong author name | Check `git config user.name` — it should match your expected name |
 | Can't run `.sh` files on Windows | Use Git Bash (not CMD or PowerShell) — or use the PowerShell version above |
-| Permission denied when running the script | Run `chmod +x scripts/daily-summary.sh` in Git Bash |
+| Permission denied when running the script | Run `chmod +x daily-summary.sh` inside the DevUtiles repo |
+| Clone succeeded but script is missing | The DevUtiles repo changed — run `git pull` inside the DevUtiles folder |
 | Report shows commits from other days | Check your system clock and timezone; the script uses your local date |
