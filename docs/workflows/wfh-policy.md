@@ -9,6 +9,17 @@ Working from home is a privilege at BSE, not a default. This policy defines the 
 !!! info "Working hours"
     BSE working hours are **9:00 AM – 5:00 PM (Africa/Cairo, UTC+2)**. Anywhere this policy says "working hours" or "during working hours", it means this window.
 
+!!! warning "When WFH is appropriate"
+    WFH is for **focused delivery work** — you have a task that needs concentration, and you can deliver it on time by working from home instead of the office. You are expected to be **working the full 9 AM – 5 PM day**, reachable on WhatsApp / Teams / email, and producing output (commits, documents, decisions) just like any office day.
+
+    WFH is **not**:
+
+    - A substitute for annual leave, sick leave, or time off.
+    - Cover for appointments, errands, or family obligations that take you away from work during working hours.
+    - A "half-day" or reduced-hours arrangement.
+
+    If you can't work the full day — for any reason — request the appropriate leave through HR instead. Mixing leave into a WFH day is dishonest and counts as an unauthorised absence.
+
 ---
 
 ## Why this matters
@@ -46,14 +57,14 @@ flowchart LR
 Contact **HR via WhatsApp** on the day before you want to work from home, **between 9:00 AM and 5:00 PM Cairo time**. Include:
 
 - The date you're requesting (e.g. "tomorrow, 17 April").
-- A short reason (optional but encouraged — helps HR prioritise if multiple people ask).
+- The **task you plan to deliver** — WFH is granted for focused delivery work, so tell HR what you'll be working on and, ideally, when it'll land.
 
 !!! warning "Timing matters"
     Requests sent outside the 9 AM – 5 PM window, or on the morning of the WFH day itself, are **not** guaranteed to be reviewed. If HR hasn't approved before you start the day, you are expected to be in the office.
 
 ### Example message
 
-> Good morning, I'd like to request to work from home tomorrow (Thursday, 17 April). Reason: family appointment in the morning. Thanks!
+> Good morning, I'd like to request to work from home tomorrow (Thursday, 17 April). I need to finish the distributor-import feature — it needs a long focused block, and I can deliver it by end of day from home. Thanks!
 
 ---
 
@@ -164,7 +175,6 @@ Use this end-to-end on every WFH day:
 | HR doesn't reply by end of day | Report to office the next day; re-send the request next time you want WFH |
 | HR is genuinely unavailable (off sick, OOO) | Post your request to the **BSE Team** WhatsApp group — a manager can approve or escalate. See [Escalation — HR unavailable](#escalation-hr-unavailable) |
 | You forget to send the morning greeting | Send it as soon as you remember, with a brief apology — don't skip it |
-| Emergency WFH (sick child, power out, etc.) | Contact HR and your manager on WhatsApp **before** start of work. This is an exception, not the rule |
 | You worked but have no commits | Send a text summary — see [above](#what-to-report-when-you-have-no-commits) |
 | You miss the 6 PM report deadline | Send it as soon as possible with a note, and flag to your manager. Repeated misses affect future approvals |
 | You're on vacation / sick leave | This policy does not apply — follow the standard leave process with HR instead |
