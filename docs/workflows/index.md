@@ -12,7 +12,7 @@ Step-by-step reference guides that define **how BSE employees carry out recurrin
 |---|---|
 | [Managing Website Content](managing-website-content.md) | Keep bse.com.eg up to date — publish news, update products, manage partners, handle translations, and more. |
 | [Daily Commit Summary](daily-commit-summary.md) | Generate a summary of all commits pushed to BSE repos for a given day or week. |
-| [WFH Daily Report](wfh-daily-report.md) | Mandatory daily report for developers working from home — must be submitted before 6 PM. |
+| [WFH Policy](wfh-policy.md) | Four-step process for working from home: request to HR → approval → morning check-in → daily report before 6 PM. |
 
 ## How to use these guides
 
