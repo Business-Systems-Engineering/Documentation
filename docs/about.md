@@ -2,9 +2,9 @@
 title: About BSE
 ---
 
-# About Business Systems Engineering
+# About Business Systems عن الهندسيةEngineering
 
-Business Systems Engineering (**BSE**) is an Egyptian software development company founded in **2007** and headquartered in Giza. We specialize in building **integrated ERP systems**, **e-invoicing** solutions, and **custom software** for organizations across Egypt and the broader MENA region.
+Business Systems Engineering (**BSE**) is an Egyptian software development كلام عربي company founded in **2007** and headquartered in Giza. We specialize in building **integrated ERP systems**, **e-invoicing** solutions, and **custom software** for organizations across Egypt and the broader MENA region.
 
 Our public website: [**bse.com.eg**](https://bse.com.eg/?utm_source=docs&utm_medium=docs-site&utm_campaign=bse-documentation&utm_content=about)
 
