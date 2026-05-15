@@ -125,7 +125,31 @@ Each RFC documents:
 
 ## Implementation Status
 
-The framework is currently in **design phase**. All ADRs and RFCs have been approved. The next step is to invoke the writing-plans skill to create a step-by-step implementation plan.
+Repository: [`Business-Systems-Engineering/bse-core`](https://github.com/Business-Systems-Engineering/bse-core) (monorepo hosting all packages under `src/`).
+
+| Package | Status | Tag | Plan |
+|---|---|---|---|
+| `Bse.Framework.Core` | **Shipped** | `bse.framework.core/v0.1.0` | [2026-04-06-bse-framework-core.md](plans/2026-04-06-bse-framework-core.md) |
+| `Bse.Framework.Telemetry` | **Shipped** | `bse.framework.telemetry/v0.1.0` | [2026-05-15-bse-framework-telemetry.md](plans/2026-05-15-bse-framework-telemetry.md) |
+| `Bse.Framework.Data` | In planning | — | (drafting) |
+| `Bse.Framework.Data.EntityFramework` | In planning | — | (drafting) |
+| `Bse.Framework.Rpc` | Not started | — | — |
+| `Bse.Framework.Rpc.RedisStreams` | Not started | — | — |
+| `Bse.Framework.Rpc.Http` | Not started | — | — |
+| `Bse.Framework.MultiTenancy` | Not started | — | — |
+| `Bse.Framework.Auth` | Not started | — | — |
+| `Bse.Framework.Auth.Jwt` | Not started | — | — |
+| `Bse.Framework.Localization` | Not started | — | — |
+| `Bse.Framework.Localization.Hijri` | Not started | — | — |
+| `Bse.Framework.SourceGenerators` | Not started | — | — |
+| `Bse.Framework.SourceGenerators.Attributes` | Not started | — | — |
+| `Bse.Framework.Data.Dapper` | Not started | — | — |
+| `Bse.Framework.Testing` | Not started | — | — |
+
+**Running samples** (boot via `docker compose -f samples/observability-stack/docker-compose.yml up -d` in `bse-core`):
+
+- `samples/observability-stack/` — OTel Collector + Tempo + Loki + Prometheus + Grafana
+- `samples/otel-demo/` — minimal ASP.NET Core app exporting traces/metrics/logs end-to-end
 
 ## Review Process
 
