@@ -133,8 +133,8 @@ Repository: [`Business-Systems-Engineering/bse-core`](https://github.com/Busines
 |---|---|---|---|
 | `Bse.Framework.Core` | **Shipped** | `bse.framework.core/v0.1.0` | [2026-04-06-bse-framework-core.md](plans/2026-04-06-bse-framework-core.md) |
 | `Bse.Framework.Telemetry` | **Shipped** | `bse.framework.telemetry/v0.1.0` | [2026-05-15-bse-framework-telemetry.md](plans/2026-05-15-bse-framework-telemetry.md) |
-| `Bse.Framework.Data` | In planning | — | (drafting) |
-| `Bse.Framework.Data.EntityFramework` | In planning | — | (drafting) |
+| `Bse.Framework.Data` | **Shipped** | `bse.framework.data/v0.1.0` | [2026-05-15-bse-framework-data.md](plans/2026-05-15-bse-framework-data.md) |
+| `Bse.Framework.Data.EntityFramework` | **Shipped** | `bse.framework.data.entityframework/v0.1.0` | [2026-05-15-bse-framework-data.md](plans/2026-05-15-bse-framework-data.md) |
 | `Bse.Framework.Rpc` | Not started | — | — |
 | `Bse.Framework.Rpc.RedisStreams` | Not started | — | — |
 | `Bse.Framework.Rpc.Http` | Not started | — | — |
@@ -150,8 +150,9 @@ Repository: [`Business-Systems-Engineering/bse-core`](https://github.com/Busines
 
 **Running samples** (boot via `docker compose -f samples/observability-stack/docker-compose.yml up -d` in `bse-core`):
 
-- `samples/observability-stack/` — OTel Collector + Tempo + Loki + Prometheus + Grafana
-- `samples/otel-demo/` — minimal ASP.NET Core app exporting traces/metrics/logs end-to-end
+- `samples/observability-stack/` — OTel Collector + Tempo + Loki + Prometheus + Grafana + **Postgres 16** + **Flyway 11** + **Redis 7** (Redis is idle this cycle, reserved for `Bse.Framework.Rpc.RedisStreams`)
+- `samples/otel-demo/` — minimal ASP.NET Core app exporting traces/metrics/logs
+- `samples/data-demo/` — ASP.NET Core CRUD app over `Bse.Framework.Data.EntityFramework` + Postgres, schema managed by Flyway, observability via `Bse.Framework.Telemetry`
 
 ## Review Process
 
