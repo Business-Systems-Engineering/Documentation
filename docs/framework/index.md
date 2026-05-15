@@ -27,6 +27,8 @@ This directory contains the architectural design documentation for **Bse.Framewo
 | [0007](adr/0007-calendar-provider-abstraction.md) | Pluggable ICalendarProvider | Accepted |
 | [0008](adr/0008-source-generator-automation.md) | Roslyn Source Generator Automation | Accepted |
 | [0009](adr/0009-transport-abstraction-pattern.md) | Transport Abstraction with ISP | Accepted |
+| [0010](adr/0010-flyway-for-schema-migrations.md) | Use Flyway for Schema Migrations | Accepted |
+| [0011](adr/0011-rpc-payload-encryption-and-compression.md) | Encrypt and Compress RPC Payloads in Transit | Accepted |
 
 ### Subsystem Designs (RFCs)
 

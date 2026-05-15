@@ -1,8 +1,9 @@
 # RFC-0002: RPC and Distributed Computing
 
-- **Status:** Approved
+- **Status:** Approved (revised 2026-05-15 — see ADR-0011 amendment)
 - **Date:** 2026-04-06
-- **Related ADRs:** ADR-0002, ADR-0009
+- **Revised:** 2026-05-15
+- **Related ADRs:** ADR-0002, ADR-0009, ADR-0011
 - **Related RFCs:** RFC-0001, RFC-0006
 
 ## Abstract
@@ -322,6 +323,75 @@ This matches Kubernetes' default `terminationGracePeriodSeconds=30`.
 - **Optional:** MessagePack for internal service-to-service (configurable per stream)
 - **Always:** generic `Serialize<T>`, never `Serialize(object)` (slower runtime type detection)
 
+### Payload Codec — Compression + Encryption (added 2026-05-15)
+
+Per **ADR-0011**, every RPC message is **compressed then encrypted** at the envelope layer
+before it reaches any transport. The transport sees only opaque ciphertext.
+
+**Order: compress → encrypt** (the inverse is a textbook anti-pattern — encrypted bytes
+look random and don't compress).
+
+```
+┌────────────────────────┐   compress    ┌──────────────────────┐   encrypt     ┌────────────────────────┐
+│ JSON-RPC envelope      │ ────────────▶ │ Brotli-compressed    │ ────────────▶ │ AEAD ciphertext + tag  │
+│ (System.Text.Json)     │   (Brotli L4) │ bytes                │ (AES-256-GCM) │ (+ 13-byte framing)    │
+└────────────────────────┘               └──────────────────────┘               └────────────────────────┘
+```
+
+**Wire format** (what the transport carries):
+
+```
+[1 byte version=0x01][12 byte nonce][N byte ciphertext+tag]
+```
+
+- **version** byte distinguishes raw vs compressed payloads and enables future algorithm migration.
+- **nonce** is 96-bit cryptographically random per message (NIST GCM recommendation).
+- **tag** is 128-bit GCM authentication tag, included in the ciphertext blob by the API.
+- **AAD** binds the envelope's `id`, `method`, and timestamp into the authentication tag, so any tampering with routing metadata fails decryption.
+
+**Abstractions** (shipped in `Bse.Framework.Rpc` v0.1.0):
+
+```csharp
+public interface IRpcCodec
+{
+    byte[] Encode(RpcEnvelope envelope);
+    RpcEnvelope Decode(byte[] payload);
+}
+
+public interface IRpcKeyProvider
+{
+    Task<RpcKey> GetCurrentKeyAsync(CancellationToken ct);
+    Task<RpcKey?> GetKeyByIdAsync(string keyId, CancellationToken ct);   // for rotation
+}
+```
+
+**Implementations:**
+- `EncryptedBrotliCodec` — production default. Brotli level 4, AES-256-GCM.
+- `IdentityCodec` — test-only. No compression, no encryption. Used to inspect wire format in unit tests.
+- `EnvironmentRpcKeyProvider` — reads base64 key from `BSE_RPC_KEY_<context>` env var (dev).
+- `RotatingRpcKeyProvider` — wraps any inner provider with a "current + previous" key window so rotation doesn't reject in-flight messages.
+
+**Out of scope for v0.1.0** (separate optional packages, slot in without breaking changes):
+- `Bse.Framework.Rpc.Security.Aws` — AWS KMS-backed key provider.
+- `Bse.Framework.Rpc.Security.AzureKeyVault` — Azure Key Vault provider.
+- `Bse.Framework.Rpc.Security.HashicorpVault` — Vault provider.
+
+**Threshold for skipping compression:** payloads under 100 bytes skip Brotli (compressed output would be larger). The version byte distinguishes the two cases on decode.
+
+**Configuration:**
+
+```csharp
+services.AddBseRpc(rpc => {
+    rpc.ServiceName = "student-service";
+    rpc.UseRedisStreams("redis://localhost:6379");
+
+    // Codec opt-out for in-process tests only.
+    // In any non-test deployment, EncryptedBrotliCodec is required.
+    rpc.UseCodec<EncryptedBrotliCodec>();
+    rpc.UseKeyProvider<EnvironmentRpcKeyProvider>();
+});
+```
+
 ### Observability
 
 #### ActivitySource per package
@@ -400,9 +470,12 @@ services.AddRemoteService<IBillingService>(options => {
 
 ## Security Considerations
 
+- **Payload encryption (ADR-0011):** every RPC message is encrypted with AES-256-GCM at the envelope layer before reaching the transport. Operators, sidecars, network appliances, log captures, Redis replicas, and memory dumps all see only ciphertext. This is defense in depth — transport-level TLS / mTLS may also be applied, but is not relied upon for confidentiality.
+- **Payload integrity (ADR-0011):** AES-GCM's 128-bit auth tag covers the ciphertext, and the envelope's routing metadata (`id`, `method`, timestamp) is bound into the AAD. Tampering with routing fields invalidates the tag.
+- **Key rotation:** `RotatingRpcKeyProvider` carries a "current + previous" window so rotation never rejects in-flight messages. KMS / Vault-backed providers ship as optional packages.
 - Auth context propagated via signed JWT in `TransportMessage.Auth`
 - Each service validates JWT independently (zero-trust)
-- mTLS optional for service-to-service (transport-level mutual auth)
+- mTLS optional for service-to-service (transport-level mutual auth — orthogonal to payload encryption above)
 - Tenant context immutable through middleware (cannot be tampered)
 - Idempotency prevents replay attacks within TTL window
 - Rate limiting per tenant/user/endpoint via Polly
