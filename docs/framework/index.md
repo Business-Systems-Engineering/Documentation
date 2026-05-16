@@ -135,8 +135,8 @@ Repository: [`Business-Systems-Engineering/bse-core`](https://github.com/Busines
 | `Bse.Framework.Telemetry` | **Shipped** | `bse.framework.telemetry/v0.1.0` | [2026-05-15-bse-framework-telemetry.md](plans/2026-05-15-bse-framework-telemetry.md) |
 | `Bse.Framework.Data` | **Shipped** | `bse.framework.data/v0.1.0` | [2026-05-15-bse-framework-data.md](plans/2026-05-15-bse-framework-data.md) |
 | `Bse.Framework.Data.EntityFramework` | **Shipped** | `bse.framework.data.entityframework/v0.1.0` | [2026-05-15-bse-framework-data.md](plans/2026-05-15-bse-framework-data.md) |
-| `Bse.Framework.Rpc` | Not started | — | — |
-| `Bse.Framework.Rpc.RedisStreams` | Not started | — | — |
+| `Bse.Framework.Rpc` | In flight | — | [2026-05-16-bse-framework-rpc.md](plans/2026-05-16-bse-framework-rpc.md) |
+| `Bse.Framework.Rpc.RedisStreams` | In flight | — | [2026-05-16-bse-framework-rpc.md](plans/2026-05-16-bse-framework-rpc.md) |
 | `Bse.Framework.Rpc.Http` | Not started | — | — |
 | `Bse.Framework.MultiTenancy` | Not started | — | — |
 | `Bse.Framework.Auth` | Not started | — | — |
