@@ -1,193 +1,170 @@
 # Bse.Framework Design Documentation
 
-This directory contains the architectural design documentation for **Bse.Framework**, a modular .NET 8/9 framework for building distributed multi-tenant web APIs and microservices, replacing the duplicated patterns across Stud2, SafePack2, and Orange2.
+This directory contains the **as-built** architectural documentation for **Bse.Framework**, a modular .NET 9 framework for building distributed, multi-tenant web APIs and microservices. It replaces the duplicated patterns across Stud2, SafePack2, and Orange2 with a single, package-per-concern toolkit hosted in the [`bse-core`](https://github.com/Business-Systems-Engineering/bse-core) monorepo.
+
+> **Status:** The framework is implemented and shipping. This documentation describes the code as it exists in `bse-core/src`, not a forward-looking design. Where a decision has evolved since the original design phase, a superseding ADR records the change.
 
 ## Documentation Structure
 
 | Type | Purpose |
 |---|---|
-| **ADR** (Architecture Decision Record) | Captures a single decision with context, options considered, and rationale |
-| **RFC** (Request for Comments) | Detailed design for a subsystem |
+| **RFC** (Request for Comments) | Detailed design for a subsystem, kept in step with the shipped code |
+| **ADR** (Architecture Decision Record) | A single decision with its context, options, and rationale |
 
 ## Quick Navigation
 
 ### Start Here
-- [RFC-0001: Framework Overview](rfc/0001-framework-overview.md) — High-level architecture and package list
+- [RFC-0001: Framework Overview](rfc/0001-framework-overview.md) — architecture, package graph, composition model
+
+### Subsystem Designs (RFCs)
+
+| # | Title | Status |
+|---|---|---|
+| [0001](rfc/0001-framework-overview.md) | Framework Overview | Implemented |
+| [0002](rfc/0002-rpc-distributed-computing.md) | RPC, Source Generation, and the Invocation Pipeline | Implemented |
+| [0003](rfc/0003-data-access-layer.md) | Data Access Layer (EF Core + Dapper) | Implemented |
+| [0004](rfc/0004-auth-and-security.md) | Authentication, Identity Propagation, and Authorization | Implemented |
+| [0005](rfc/0005-telemetry-and-observability.md) | Telemetry and Observability | Implemented |
+| [0006](rfc/0006-multi-tenancy.md) | Multi-Tenancy | Implemented |
+| [0007](rfc/0007-localization.md) | Localization and Calendars | Implemented |
+| [0008](rfc/0008-web-and-validation.md) | Web Hardening and Validation | Implemented |
 
 ### Architecture Decisions (ADRs)
 
 | # | Title | Status |
 |---|---|---|
 | [0001](adr/0001-modular-package-architecture.md) | Modular NuGet Package Architecture | Accepted |
-| [0002](adr/0002-json-rpc-over-redis-streams.md) | JSON-RPC 2.0 Over Multiple Transports | Accepted |
+| [0002](adr/0002-json-rpc-over-multiple-transports.md) | JSON-RPC 2.0 Over Multiple Transports | Accepted |
 | [0003](adr/0003-ef-core-plus-dapper-hybrid.md) | EF Core + Dapper Hybrid (CQRS Split) | Accepted |
-| [0004](adr/0004-hybrid-auth-jwt-plus-opaque.md) | Hybrid Authentication (JWT + Opaque Tokens) | Accepted |
+| [0004](adr/0004-auth-via-bse-common-adapter.md) | Authentication via a BSE.Common Adapter | Accepted |
 | [0005](adr/0005-opentelemetry-grafana-stack.md) | OpenTelemetry → Grafana Stack | Accepted |
-| [0006](adr/0006-hybrid-multi-tenancy.md) | Hybrid Multi-Tenancy with RLS | Accepted |
+| [0006](adr/0006-hybrid-multi-tenancy.md) | Ambient Tenant Context + EF Query-Filter Isolation | Accepted |
 | [0007](adr/0007-calendar-provider-abstraction.md) | Pluggable ICalendarProvider | Accepted |
-| [0008](adr/0008-source-generator-automation.md) | Roslyn Source Generator Automation | Accepted |
-| [0009](adr/0009-transport-abstraction-pattern.md) | Transport Abstraction with ISP | Accepted |
-| [0010](adr/0010-flyway-for-schema-migrations.md) | Use Flyway for Schema Migrations | Accepted |
+| [0008](adr/0008-source-generator-automation.md) | Roslyn Source-Generator Handler Registration | Accepted |
+| [0009](adr/0009-transport-abstraction-pattern.md) | Segregated Transport Interfaces (ISP) | Accepted |
+| [0010](adr/0010-flyway-for-schema-migrations.md) | Opt-In EF Migrations, Flyway by Default | Accepted |
 | [0011](adr/0011-rpc-payload-encryption-and-compression.md) | Encrypt and Compress RPC Payloads in Transit | Accepted |
-
-### Subsystem Designs (RFCs)
-
-| # | Title | Status |
-|---|---|---|
-| [0001](rfc/0001-framework-overview.md) | Framework Overview | Approved |
-| [0002](rfc/0002-rpc-distributed-computing.md) | RPC and Distributed Computing | Approved |
-| [0003](rfc/0003-data-access-layer.md) | Data Access Layer | Approved |
-| [0004](rfc/0004-auth-and-security.md) | Authentication, Authorization, and Security | Approved |
-| [0005](rfc/0005-telemetry-and-observability.md) | Telemetry and Observability | Approved |
-| [0006](rfc/0006-multi-tenancy.md) | Multi-Tenancy | Approved |
-| [0007](rfc/0007-localization.md) | Localization | Approved |
+| [0012](adr/0012-aes-gcm-codec-framing-and-key-rotation.md) | AES-256-GCM Codec Framing and Key Rotation | Accepted |
+| [0013](adr/0013-cross-process-identity-propagation.md) | Cross-Process Identity Propagation on the Envelope | Accepted |
+| [0014](adr/0014-per-handler-authorization-filter-pipeline.md) | Per-Handler Authorization via an Invocation-Filter Pipeline | Accepted |
 
 ## Framework at a Glance
 
 ### What It Replaces
 
-The framework consolidates patterns currently duplicated across three BSE applications:
+The framework consolidates patterns previously duplicated across three BSE applications:
 
-| Concern | Stud2 | SafePack2 | Orange2 | Framework |
-|---|---|---|---|---|
-| Framework | .NET FW 4.6.1 | .NET FW 4.6.1 | .NET FW 4.6.1 | .NET 8/9 |
-| API | Web API 5.2.7 | Web API 5.2.7 | Web API 5.2.7 | ASP.NET Core |
-| ORM | EF6 DB-First | EF6 DB-First | EF6 DB-First | EF Core + Dapper |
-| DI | Unity 5.9.3 | Unity 5.9.3 | Unity 5.9.3 | Microsoft.Extensions.DependencyInjection |
-| Auth | DES tokens | DES tokens | DES tokens | OpenIddict + Identity.Core |
-| Logging | DB only | Prometheus only | None | OpenTelemetry → Grafana stack |
-| Pagination | None | OFFSET/FETCH | ROW_NUMBER() | Offset + Keyset (auto via attributes) |
+| Concern | Stud2 / SafePack2 / Orange2 (legacy) | Bse.Framework |
+|---|---|---|
+| Runtime | .NET Framework 4.6.1 | .NET 9 |
+| API | ASP.NET Web API 5.2.7 | ASP.NET Core (minimal APIs + JSON-RPC) |
+| ORM | EF6 DB-First | EF Core (writes) + Dapper (reads) |
+| DI | Unity 5.9.3 | Microsoft.Extensions.DependencyInjection |
+| Auth | DES tokens | JWT bearer + opaque, via `BSE.Common` adapter |
+| Inter-service | direct DB / ad-hoc HTTP | JSON-RPC 2.0 over Redis Streams or HTTP |
+| Logging | DB / Prometheus / none | OpenTelemetry → Grafana (Tempo/Loki/Prometheus) |
+| Tenancy | implicit CompCode columns | ambient `ITenantContext` + EF query-filter isolation |
 
-### 16 Packages
+### 21 Packages
 
 ```
-Bse.Framework.Core                            ← DI, config, logging, base types
-Bse.Framework.MultiTenancy                    ← Tenant resolution, ITenantContext
-Bse.Framework.Rpc                             ← JSON-RPC 2.0 protocol + abstractions
-Bse.Framework.Rpc.RedisStreams                ← Redis Streams transport
-Bse.Framework.Rpc.Http                        ← HTTP transport
-Bse.Framework.Data                            ← Repository + query abstractions
-Bse.Framework.Data.EntityFramework            ← EF Core implementation
-Bse.Framework.Data.Dapper                     ← Dapper.AOT implementation
-Bse.Framework.Auth                            ← Auth abstractions
-Bse.Framework.Auth.Jwt                        ← OpenIddict-based auth
-Bse.Framework.Telemetry                       ← OpenTelemetry config
-Bse.Framework.Localization                    ← ICalendarProvider abstraction
-Bse.Framework.Localization.Hijri              ← Hijri calendar plugin
-Bse.Framework.SourceGenerators                ← Roslyn analyzers
-Bse.Framework.SourceGenerators.Attributes     ← Marker attributes
-Bse.Framework.Testing                         ← Test fixtures + helpers
+Bse.Framework.Core                            ← DI composition, exceptions, Result<T>, clock, GUIDs, redaction, ProblemDetails, shutdown, health
+Bse.Framework.Testing                         ← in-memory RPC transport + two-service test rig
+
+Bse.Framework.Rpc                             ← JSON-RPC 2.0 protocol, encrypted envelope, dispatcher, invocation-filter pipeline
+Bse.Framework.Rpc.RedisStreams                ← Redis Streams transport (consumer groups, claim-sweep retry)
+Bse.Framework.Rpc.Http                        ← HTTP transport (POST /rpc/{service}, deadline header)
+Bse.Framework.SourceGenerators                ← Roslyn generator: handler registration from attributes
+Bse.Framework.SourceGenerators.Attributes     ← [BseRpcHandler], [RequiresAuthentication] (netstandard2.0)
+
+Bse.Framework.Data                            ← entity/audit/tenant/concurrency interfaces, specification + repository abstractions, offset pagination
+Bse.Framework.Data.EntityFramework            ← EF Core impl: BseDbContext, auditing + concurrency + instrumentation interceptors, query-filter conventions
+Bse.Framework.Data.Dapper                     ← Dapper read-side repository for the CQRS query path
+
+Bse.Framework.Auth                            ← IBseUser / IBseUserAccessor identity abstractions (AsyncLocal)
+Bse.Framework.Auth.Jwt                        ← JWT/claims → BseUser mapping middleware (adapter over BSE.Common)
+Bse.Framework.Auth.Rpc                        ← cross-process identity: outgoing decorator + inbound scope
+
+Bse.Framework.MultiTenancy                    ← ITenantContext(Accessor), resolver chain
+Bse.Framework.MultiTenancy.AspNetCore         ← HTTP tenant-resolution middleware (header / host / claim)
+Bse.Framework.MultiTenancy.Rpc               ← cross-process tenancy: outgoing decorator + inbound scope
+
+Bse.Framework.Localization                    ← ICalendarProvider abstraction, BseDateOnly, Gregorian default
+Bse.Framework.Localization.Hijri              ← Umm al-Qura (Hijri) calendar provider
+
+Bse.Framework.Telemetry                       ← OpenTelemetry traces/metrics/logs, OTLP export, PII redaction
+Bse.Framework.Validation                      ← FluentValidation rules + sanitizers (adapter over BSE.Common)
+Bse.Framework.Web                             ← security headers + rate limiting (adapter over BSE.Common)
 ```
+
+### Composition Model
+
+Every service composes the framework through a single DI entry point and a fluent builder:
+
+```csharp
+services.AddBseFramework(framework =>
+{
+    framework.AddBseRpc(rpc =>
+    {
+        rpc.ServiceName = "students";
+        rpc.UseEnvironmentKeys()
+           .UseEncryptedBrotliCodec()
+           .AddBseRpcGeneratedHandlers();   // emitted by the source generator
+        rpc.UseRedisStreams(connectionString).UseRedisStreamsServer();
+    });
+
+    framework.AddBseAuth();
+    framework.AddBseMultiTenancy(t => t.AddResolver<HeaderTenantResolver>());
+    framework.AddBseTelemetry(t => t.UseOtlpExporter(otlpEndpoint));
+});
+
+app.UseBseExceptionHandler();   // RFC 9457 Problem Details — must be first
+```
+
+Each feature package extends `IBseFrameworkBuilder` with an `AddBseXxx(...)` method, registers a no-op `IBseModule` marker so dependents can assert prerequisites (`HasModule<T>()`), and uses `TryAdd` so applications may pre-register overrides (e.g. a frozen `ISystemClock` in tests).
 
 ### Key Design Principles
 
-1. **Modular** — Pick only the packages you need
-2. **Abstractions vs Implementations** — Microsoft.Extensions.* pattern
-3. **Source Generators Over Reflection** — Compile-time, no runtime overhead
-4. **Defense in Depth** — Multi-tenant isolation in 4 layers
-5. **Industry Standards** — OAuth2/OIDC, OpenTelemetry, NIST 800-63B-4, OWASP ASVS 5.0
-6. **Migration-Friendly** — Adopt one package at a time
-7. **Docker-First** — Containerized deployment is the default
+1. **Modular** — take only the packages you need; abstractions and implementations ship separately (the `Microsoft.Extensions.*` pattern).
+2. **Source generators over reflection** — handler registration is generated at compile time; no startup scanning.
+3. **Ambient context via AsyncLocal** — identity, tenant, and calendar flow through `AsyncLocal` accessors, stamped onto the RPC envelope at the process boundary and re-pushed on the other side.
+4. **Typed error taxonomy** — a flat `BseException` hierarchy maps deterministically to HTTP status codes and JSON-RPC error codes.
+5. **Defense in depth** — encrypted RPC payloads, PII-redacted telemetry, EF query-filter tenant isolation, and security-header hardening.
+6. **Adapter over `BSE.Common`** — auth, validation, and web-hardening reuse the vetted `BSE.Common.Security` implementations behind framework-shaped facades.
+7. **Docker-first, observability-first** — every service emits OTLP traces/metrics/logs to the Grafana stack out of the box.
 
-### Critical Design Decisions
+### Highest-Impact Decisions
 
-These are the highest-impact decisions made during the design process:
-
-1. **JSON-RPC 2.0 over multiple transports** instead of gRPC — protocol consistency, ecosystem familiarity
-2. **EF Core + Dapper CQRS split** instead of single ORM — matches existing patterns, eliminates SQL injection
-3. **Source generators** instead of reflection — eliminates 240+ manual registrations, compile-time safety
-4. **OpenIddict** instead of custom auth — OAuth2/OIDC compliance for free
-5. **PostgreSQL Row-Level Security** as 4th tenant isolation layer — closes the Dapper-bypasses-EF-filters gap
-6. **Per-tenant Options pattern** (Finbuckle-style) — any IOptions<T> becomes tenant-aware
-7. **Two-tier OpenTelemetry Collector** for tail sampling — single collector silently drops fragmented traces
+1. **JSON-RPC 2.0 over pluggable transports** ([ADR-0002](adr/0002-json-rpc-over-multiple-transports.md), [ADR-0009](adr/0009-transport-abstraction-pattern.md)) rather than gRPC — protocol consistency across Redis Streams and HTTP with segregated `IMessagePublisher`/`IRpcClient`/`IMessageConsumer`/`ITransportHealth` interfaces.
+2. **Encrypted, compressed envelopes** ([ADR-0011](adr/0011-rpc-payload-encryption-and-compression.md), [ADR-0012](adr/0012-aes-gcm-codec-framing-and-key-rotation.md)) — AES-256-GCM over Brotli with a versioned frame and key-id-based rotation.
+3. **EF Core + Dapper CQRS split** ([ADR-0003](adr/0003-ef-core-plus-dapper-hybrid.md)) — EF for the write model + change tracking + query filters, Dapper for read-side SQL.
+4. **Source-generator handler registration** ([ADR-0008](adr/0008-source-generator-automation.md)) — `[BseRpcHandler("method")]` becomes a compile-time registration call, eliminating manual wiring.
+5. **Cross-process identity + per-handler authorization** ([ADR-0013](adr/0013-cross-process-identity-propagation.md), [ADR-0014](adr/0014-per-handler-authorization-filter-pipeline.md)) — `UserId`/`UserCode`/`TenantId` travel on the envelope; `[RequiresAuthentication]` is enforced by a reusable invocation-filter pipeline before the handler runs.
+6. **Ambient tenancy + query-filter isolation** ([ADR-0006](adr/0006-hybrid-multi-tenancy.md)) — a tenant slug resolved per request/message and enforced by an EF global query filter on `IMultiTenant` entities.
 
 ## Documentation Conventions
 
-### ADRs
-
-Each ADR documents:
-- **Context** — What is the issue?
-- **Decision** — What did we decide?
-- **Options Considered** — What alternatives did we evaluate?
-- **Rationale** — Why did we choose this?
-- **Consequences** — Positive, negative, neutral impacts
-- **References** — Related documents and external links
-
 ### RFCs
+Each RFC follows: **Abstract → Motivation → Goals / Non-Goals → Design** (Overview, Components, Data Flow, API/Interfaces, Configuration, Error Handling, Performance, Security, Observability, Testing) **→ Migration Path → Open Questions → References**. Template: [`rfc/template.md`](rfc/template.md).
 
-Each RFC documents:
-- **Abstract** — One-paragraph summary
-- **Motivation** — Why we're doing this, current state, problems
-- **Goals / Non-Goals** — What we will and won't address
-- **Design** — Detailed component and interface design
-- **Migration Path** — How existing code/systems migrate
-- **Configuration** — How users configure the subsystem
-- **Performance / Security / Observability / Testing** — Cross-cutting concerns
-- **References** — Related documents and external links
+### ADRs
+Each ADR follows: **Context → Decision → Options Considered → Rationale → Consequences → References**. Template: [`adr/template.md`](adr/template.md).
+
+### Contributing
+1. RFCs track the shipped code — update them when the code changes.
+2. ADRs are immutable once accepted; record a change by adding a superseding ADR (e.g. ADR-0004 supersedes the earlier hybrid-auth decision; ADR-0013/0014 extend the RPC design).
+3. Cross-link related RFCs and ADRs.
 
 ## Implementation Status
 
-Repository: [`Business-Systems-Engineering/bse-core`](https://github.com/Business-Systems-Engineering/bse-core) (monorepo hosting all packages under `src/`).
+Repository: [`Business-Systems-Engineering/bse-core`](https://github.com/Business-Systems-Engineering/bse-core) — monorepo hosting all packages under `src/`, tests under `tests/`, and runnable samples under `samples/`.
 
-| Package | Status | Tag | Plan |
-|---|---|---|---|
-| `Bse.Framework.Core` | **Shipped** | `bse.framework.core/v0.1.0` | [2026-04-06-bse-framework-core.md](plans/2026-04-06-bse-framework-core.md) |
-| `Bse.Framework.Telemetry` | **Shipped** | `bse.framework.telemetry/v0.1.0` | [2026-05-15-bse-framework-telemetry.md](plans/2026-05-15-bse-framework-telemetry.md) |
-| `Bse.Framework.Data` | **Shipped** | `bse.framework.data/v0.1.0` | [2026-05-15-bse-framework-data.md](plans/2026-05-15-bse-framework-data.md) |
-| `Bse.Framework.Data.EntityFramework` | **Shipped** | `bse.framework.data.entityframework/v0.1.0` | [2026-05-15-bse-framework-data.md](plans/2026-05-15-bse-framework-data.md) |
-| `Bse.Framework.Rpc` | In flight | — | [2026-05-16-bse-framework-rpc.md](plans/2026-05-16-bse-framework-rpc.md) |
-| `Bse.Framework.Rpc.RedisStreams` | In flight | — | [2026-05-16-bse-framework-rpc.md](plans/2026-05-16-bse-framework-rpc.md) |
-| `Bse.Framework.Rpc.Http` | Not started | — | — |
-| `Bse.Framework.MultiTenancy` | Not started | — | — |
-| `Bse.Framework.Auth` | Not started | — | — |
-| `Bse.Framework.Auth.Jwt` | Not started | — | — |
-| `Bse.Framework.Localization` | Not started | — | — |
-| `Bse.Framework.Localization.Hijri` | Not started | — | — |
-| `Bse.Framework.SourceGenerators` | Not started | — | — |
-| `Bse.Framework.SourceGenerators.Attributes` | Not started | — | — |
-| `Bse.Framework.Data.Dapper` | Not started | — | — |
-| `Bse.Framework.Testing` | Not started | — | — |
-
-**Running samples** (boot via `docker compose -f samples/observability-stack/docker-compose.yml up -d` in `bse-core`):
-
-- `samples/observability-stack/` — OTel Collector + Tempo + Loki + Prometheus + Grafana + **Postgres 16** + **Flyway 11** + **Redis 7** (Redis is idle this cycle, reserved for `Bse.Framework.Rpc.RedisStreams`)
-- `samples/otel-demo/` — minimal ASP.NET Core app exporting traces/metrics/logs
-- `samples/data-demo/` — ASP.NET Core CRUD app over `Bse.Framework.Data.EntityFramework` + Postgres, schema managed by Flyway, observability via `Bse.Framework.Telemetry`
-
-## Review Process
-
-Each RFC underwent industry best-practices review against:
-- ABP Framework
-- MassTransit
-- Wolverine
-- Rebus
-- NServiceBus
-- Dapr
-- Finbuckle.MultiTenant
-- Microsoft.AspNetCore.Identity.Core
-- OpenIddict
-- OpenTelemetry .NET SDK
-- Dapper.AOT
-- Ardalis.Specification
-- AWS/Azure SaaS architecture guidance
-- NIST SP 800-63B-4
-- OWASP ASVS 5.0
-- OWASP Top 10:2025
-
-## Contributing
-
-When updating the design:
-1. ADRs are immutable once accepted. Create a new ADR that supersedes the old one.
-2. RFCs can be updated for clarification. Substantial changes warrant a new RFC.
-3. Use the templates in `adr/template.md` and `rfc/template.md`.
-4. Cross-link related ADRs and RFCs.
+All 21 packages are **implemented with unit and integration test suites**. Cross-process integration (identity + tenancy over the RPC envelope) is exercised end-to-end through the in-memory two-service rig in `Bse.Framework.Testing`, and the Redis Streams / HTTP transports are covered by Testcontainers-backed integration tests.
 
 ## References to Source Material
 
-The framework design draws on these existing systems:
+The framework design draws on: ABP Framework, MassTransit, Rebus, NServiceBus, Dapr, Finbuckle.MultiTenant, ASP.NET Core Identity, OpenTelemetry .NET, Dapper, Ardalis.Specification, NIST SP 800-63B-4, and OWASP ASVS 5.0 / Top 10:2025.
 
 ### BSE Internal
-- **Stud2** — University management system (.NET FW 4.6.1)
-- **SafePack2** — Inventory/ERP system (.NET FW 4.6.1)
-- **Orange2** — Accounting/ERP system (.NET FW 4.6.1)
-- **notifyd** — Go notification service (existing reference)
+- **Stud2 / SafePack2 / Orange2** — legacy .NET Framework 4.6.1 line-of-business systems being modernized onto this framework.
+- **`BSE.Common`** — shared security library providing the vetted JWT/opaque token, validation, and web-hardening implementations that the `Auth.Jwt`, `Validation`, and `Web` packages adapt.

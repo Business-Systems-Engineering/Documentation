@@ -1,519 +1,512 @@
-# RFC-0004: Authentication, Authorization, and Security
+# RFC-0004: Authentication, Identity Propagation, and Authorization
 
-- **Status:** Approved
-- **Date:** 2026-04-06
-- **Related ADRs:** ADR-0004
-- **Related RFCs:** RFC-0001, RFC-0006
+- **Status:** Implemented
+- **Date:** 2026-07-05
+- **Authors:** BSE Framework Team
+- **Related ADRs:** ADR-0004, ADR-0013, ADR-0014
+- **Related RFCs:** RFC-0001, RFC-0002, RFC-0006
 
 ## Abstract
 
-The framework provides a hybrid authentication system: opaque tokens (with Redis session store) for user sessions, and short-lived asymmetric-signed JWTs for service-to-service RPC. Both flows are issued by **OpenIddict** for OAuth 2.0/OIDC compliance. Built on **`Microsoft.AspNetCore.Identity.Core`** for proven primitives (account lockout, security stamp, MFA, password history). Includes WebAuthn/passkey support, Argon2id password hashing with HIBP breach checking, RBAC permissions integrated with ASP.NET Core's `IAuthorizationHandler`, audit logging for all auth events, multi-tenant CORS, API key support, and a comprehensive security control set aligned with NIST SP 800-63B-4 and OWASP ASVS 5.0.
+The BSE Framework auth stack is implemented across three focused packages — `Bse.Framework.Auth`
+(abstractions), `Bse.Framework.Auth.Jwt` (HTTP adapter over BSE.Common), and
+`Bse.Framework.Auth.Rpc` (cross-process propagation) — plus a built-in invocation filter in
+`Bse.Framework.Rpc`. Together they deliver a complete identity pipeline: JWT claims are mapped
+to a strongly-typed `IBseUser` and stored in an `AsyncLocal` slot; outgoing RPC envelopes are
+automatically stamped with the caller's identity; inbound envelopes reconstruct a minimal user
+context before the handler is resolved; and `[RequiresAuthentication]` on any handler class
+causes the dispatcher to gate the call with a typed `-32006` error before a single line of
+application code executes.
 
 ## Motivation
 
-The existing BSE apps have critical security debt:
-- **DES encryption** with hardcoded key `"Business-Systems"` for token generation
-- **Plain text passwords** in `G_USERS` table
-- **No MFA** anywhere
-- **No proper RBAC** (`G_ROLE_USERS` table exists but unused)
-- **`[AllowAnonymous]` everywhere** with manual `CheckUser()` validation in each controller
-- **No rate limiting** (vulnerable to brute force)
-- **No audit logging** (regulatory non-compliance)
-- **No password breach detection**
-- **No account lockout**
-- **CORS wildcard** (`*`)
-- **No API key support** for partner integrations
+Before this work the framework had no shared identity model. Individual services extracted JWT
+claims ad-hoc, passed `UserCode` strings through hand-rolled method parameters, and had no
+mechanism to propagate the caller's identity across an RPC hop. The result was:
 
-This is a SOC 2 audit failure waiting to happen.
+- Duplicate claim-parsing logic in every service.
+- `CompCode` treated as a tenant discriminator in some services and a user attribute in others.
+- Cross-process calls that silently dropped the caller's identity, making audit-trail
+  reconstruction impossible.
+- No declarative way to mark an RPC handler as requiring an authenticated caller; services
+  implemented their own null-checks inconsistently.
+
+The prior art is well-established. ASP.NET Core's `IHttpContextAccessor` and its
+`AsyncLocal`-backed implementation show the accessor pattern. Microsoft.AspNetCore.Identity
+separates the identity model (`ClaimsPrincipal`) from the authentication middleware (token
+validators). NIST SP 800-63B defines authentication assurance levels that the JWT adapter
+honours via BSE.Common's token-verification layer.
 
 ## Goals
 
-- Replace DES tokens with industry-standard authentication (Argon2id, OpenIddict, JWT with key rotation)
-- Provide MFA (TOTP) and passkeys (WebAuthn)
-- RBAC permission system integrated with ASP.NET Core authorization
-- Audit logging for all auth events (NIST/OWASP requirement)
-- Hybrid token model (opaque for users, JWT for services)
-- API key authentication for partner integrations
-- Multi-tenant CORS isolation
-- Rate limiting per user/tenant/endpoint (Redis-backed for distributed)
-- Migration path from existing plain-text passwords
-- Compliance with NIST SP 800-63B-4 and OWASP ASVS 5.0
+- A single, immutable `IBseUser` value object that all framework packages share.
+- An `AsyncLocal`-backed accessor so any code in the call tree can read the current user
+  without explicit parameter threading.
+- An HTTP adapter that maps BSE.Common JWT claims to `IBseUser` without reimplementing
+  any cryptography.
+- Automatic identity stamping on outgoing RPC envelopes and automatic reconstruction on
+  inbound envelopes.
+- A declarative `[RequiresAuthentication]` attribute that the source generator and dispatcher
+  enforce without coupling the `Bse.Framework.Rpc` package to `Bse.Framework.Auth`.
+- Structured-log enrichment with `UserId` on every RPC dispatch.
 
 ## Non-Goals
 
-- Replacing OpenIddict with custom OAuth implementation
-- Supporting username/password as the ONLY auth method (MFA is mandatory for AAL2)
-- Implementing custom cryptographic primitives
+- Reimplementing JWT cryptography or token issuance — that is BSE.Common's responsibility.
+- Policy-based or role-based authorization at the RPC handler level (planned; see Open Questions).
+- Cross-service role/claims propagation — only `UserId` and `UserCode` travel in the envelope;
+  downstream services re-fetch richer identity from the auth backend if they need it.
+- WebAuthn, TOTP, session management, API keys, or audit logging — those concerns belong in
+  the Identity microservice and are outside the framework transport layer.
 
 ## Design
 
-### Auth Abstractions (Bse.Framework.Auth)
+### Overview
+
+The stack has four layers, each narrowly responsible:
+
+```
+┌─────────────────────────────────────────────────────┐
+│ Bse.Framework.Auth                                  │
+│   IBseUser / BseUser / BseUser.Empty                │
+│   IBseUserAccessor / AsyncLocalBseUserAccessor      │
+└──────────────────┬──────────────────────────────────┘
+                   │ depended on by
+   ┌───────────────┼───────────────────┐
+   ▼                                   ▼
+┌─────────────────────┐   ┌──────────────────────────┐
+│ Bse.Framework.      │   │ Bse.Framework.Auth.Rpc   │
+│ Auth.Jwt            │   │   BseUserOutgoing-        │
+│   BseAuthUser-      │   │     EnvelopeDecorator     │
+│     Middleware      │   │   BseUserRpc-             │
+│   (HTTP adapter)    │   │     EnvelopeScope         │
+└─────────────────────┘   └──────────────────────────┘
+                                        │ hooks into
+                           ┌────────────▼─────────────┐
+                           │ Bse.Framework.Rpc        │
+                           │   AuthenticationInvocation│
+                           │     Filter (-32006 gate)  │
+                           └──────────────────────────┘
+```
+
+`Bse.Framework.Auth` has no dependency on RPC, HTTP, or BSE.Common — it is the portable
+foundation everything else builds on. `Bse.Framework.Auth.Jwt` depends on Auth and BSE.Common
+but not on Rpc. `Bse.Framework.Auth.Rpc` depends on Auth and Rpc but not on Auth.Jwt.
+`Bse.Framework.Rpc`'s `AuthenticationInvocationFilter` depends only on the envelope's
+`UserId` field — no Auth package reference required (ADR-0014).
+
+### Components
+
+#### Identity Value Object (`Bse.Framework.Auth`)
 
 ```csharp
-public interface ICurrentUser
+public interface IBseUser
 {
-    bool IsAuthenticated { get; }
-    string UserId { get; }
-    string? UserName { get; }
-    string? Email { get; }
-    string TenantId { get; }
-    string? BranchId { get; }
-    IReadOnlyList<string> Roles { get; }
-    IReadOnlyList<Claim> Claims { get; }
-    T? GetClaim<T>(string claimType);
-}
-
-public interface IPermissionChecker
-{
-    Task<bool> HasPermissionAsync(string permission);
-    Task<bool> HasAnyPermissionAsync(params string[] permissions);
-    Task<bool> HasAllPermissionsAsync(params string[] permissions);
+    string                           UserId     { get; }
+    string?                          UserCode   { get; }
+    int?                             CompCode   { get; }
+    int?                             BraCode    { get; }
+    int?                             FinYear    { get; }
+    IReadOnlyCollection<string>      Roles      { get; }
+    IReadOnlyDictionary<string,string> Claims   { get; }
+    IReadOnlyDictionary<string,string> Extensions { get; }
+    bool                             IsAuthenticated { get; }
 }
 ```
 
-### Permission Definition (Code-First)
+`BseUser` is a `sealed record` implementing `IBseUser`. All nine members are positional
+constructor parameters; the type is immutable by construction. `BseUser.Empty` is the
+singleton unauthenticated sentinel:
 
 ```csharp
-public interface IPermissionDefinitionProvider
+public static readonly IBseUser Empty = new BseUser(
+    UserId: string.Empty, UserCode: null,
+    CompCode: null, BraCode: null, FinYear: null,
+    Roles: Array.Empty<string>(),
+    Claims: new Dictionary<string, string>(StringComparer.Ordinal),
+    Extensions: new Dictionary<string, string>(0, StringComparer.Ordinal),
+    IsAuthenticated: false);
+```
+
+`IBseUser` mirrors `BSE.Common.Security.Tokens.UserTokenContext` to allow one-to-one mapping
+from a validated JWT with no impedance mismatch.
+
+#### Accessor (`Bse.Framework.Auth`)
+
+```csharp
+public interface IBseUserAccessor
 {
-    void Define(PermissionDefinitionContext context);
+    IBseUser    Current { get; }           // never null; returns BseUser.Empty when no user pushed
+    IDisposable Push(IBseUser user);       // scope user to current async context; restores on Dispose
 }
+```
 
-public class StudentPermissions : IPermissionDefinitionProvider
+`AsyncLocalBseUserAccessor` backs the accessor with a `static readonly AsyncLocal<IBseUser?>`.
+The static field means all DI-resolved instances share the same slot — middleware writing the
+slot is visible anywhere in the same async context tree, regardless of which instance holds the
+reference. This is the same pattern ASP.NET Core uses for `IHttpContextAccessor`.
+
+`Push` captures the previous value, sets the slot, and returns a `RestoreScope` that writes
+the previous value back on `Dispose`. The implementation is idempotent-on-double-dispose via a
+`_disposed` guard.
+
+`AddBseAuth()` registers the accessor via `TryAddSingleton`, so services that call it multiple
+times (e.g. when both the JWT and RPC integration call it as a prerequisite) always end up with
+a single shared instance.
+
+#### JWT Adapter (`Bse.Framework.Auth.Jwt`)
+
+This package contains **zero JWT cryptography**. It is a thin adapter over BSE.Common's auth
+pipeline (ADR-0004):
+
+```csharp
+// DI registration — delegates entirely to BSE.Common
+public static IBseFrameworkBuilder AddBseAuthJwt(
+    this IBseFrameworkBuilder builder,
+    IConfiguration configuration,
+    Action<BseAuthJwtBuilder>? configure = null)
+```
+
+`BseAuthJwtBuilder` exposes two methods:
+
+| Method | Delegation target |
+|---|---|
+| `UseJwtBearer()` | `services.AddBseAuth(configuration)` (BSE.Common) — registers JWT bearer, `ITokenGenerator`, `IRefreshTokenGenerator`, and authorization policies |
+| `UseSecurity()` | `services.AddBseSecurity(configuration)` (BSE.Common) — registers `IEncryptionService`, `IPasswordHasher`, `IDataHasher`, `ITotpService` |
+
+When `configure` is `null` both methods are called automatically. When a custom callback is
+supplied, the caller is responsible for invoking `UseJwtBearer()` and `UseSecurity()` as
+needed — forgetting `UseSecurity()` leaves `IPasswordHasher` unregistered.
+
+`BseAuthUserMiddleware` runs after `UseAuthentication` / `UseAuthorization` and maps the
+`ClaimsPrincipal` to `IBseUser`:
+
+| JWT claim | `IBseUser` member | Notes |
+|---|---|---|
+| `uid` | `UserId` | Falls back to `ClaimTypes.NameIdentifier` |
+| `user_code` | `UserCode` | Null when claim absent |
+| `comp_code` | `CompCode` | `int.TryParse`; non-numeric → `null` |
+| `bra_code` | `BraCode` | `int.TryParse`; non-numeric → `null` |
+| `fin_year` | `FinYear` | `int.TryParse`; non-numeric → `null` |
+| `roles` (repeated) | `Roles` | All occurrences collected in declaration order |
+| all claims | `Claims` | First-wins on duplicate types |
+| `ext_*` claims | `Extensions` | Prefix stripped: `ext_dept` → `Extensions["dept"]` |
+
+For unauthenticated requests (`HttpContext.User.Identity.IsAuthenticated == false`) the
+middleware is a no-op; `IBseUserAccessor.Current` continues to return `BseUser.Empty`.
+
+The full pipeline is registered by:
+
+```csharp
+// Program.cs / Startup.cs
+
+// DI
+builder.Services.AddBseFramework()
+    .AddBseAuthJwt(configuration);       // wires BSE.Common JWT + BseUser mapping
+
+// Middleware — order matters
+app.UseRouting();
+app.UseBseAuthJwt();                     // UseAuthentication + UseAuthorization + BseAuthUserMiddleware
+app.UseBseMultiTenancy();                // reads tenant_id claim after authentication
+app.MapControllers();
+```
+
+#### Cross-Process Identity (`Bse.Framework.Auth.Rpc`, ADR-0013)
+
+Two singletons bridge the `IBseUserAccessor` slot and the `TransportMessage` envelope.
+
+**Outgoing decorator** — stamps envelopes before publishing:
+
+```csharp
+public TransportMessage Decorate(TransportMessage envelope)
 {
-    public const string View = "Students.View";
-    public const string Create = "Students.Create";
-    public const string Edit = "Students.Edit";
-    public const string Delete = "Students.Delete";
-    public const string Enroll = "Students.Enroll";
+    var current = _accessor.Current;
 
-    public void Define(PermissionDefinitionContext context)
+    if (!current.IsAuthenticated || envelope.UserId is not null)
+        return envelope;                 // no-op: anonymous or already stamped
+
+    return envelope with { UserId = current.UserId, UserCode = current.UserCode };
+}
+```
+
+The `envelope.UserId is not null` guard prevents accidental overwrite of an explicitly-set
+identity — useful for background jobs that synthesize their own caller identity.
+
+**Inbound scope** — reconstructs a minimal user from the envelope before the handler is
+resolved:
+
+```csharp
+public IDisposable Push(TransportMessage envelope)
+{
+    if (envelope.UserId is null)
+        return NoOpDisposable.Instance;  // singleton; no heap allocation for open methods
+
+    var minimalUser = new BseUser(
+        UserId: envelope.UserId,
+        UserCode: envelope.UserCode,
+        CompCode: null, BraCode: null, FinYear: null,
+        Roles: Array.Empty<string>(),
+        Claims: new Dictionary<string, string>(0, StringComparer.Ordinal),
+        Extensions: new Dictionary<string, string>(0, StringComparer.Ordinal),
+        IsAuthenticated: true);
+
+    return _accessor.Push(minimalUser);
+}
+```
+
+Only `UserId` and `UserCode` travel cross-process. Roles, claims, `CompCode`, `BraCode`, and
+`FinYear` are not propagated — downstream handlers that need them must re-fetch from the auth
+backend. This is a deliberate security boundary: a rogue upstream service cannot escalate
+privileges by forging claims in the envelope.
+
+`UserCode` was added alongside `UserId` because application code historically used
+`UserCode` (the human-readable login code, e.g. `"ADMIN"`) as the semantic caller identifier
+in business operations. Propagating only `UserId` would require every downstream handler to
+perform an extra lookup to recover `UserCode`, which is a read-only attribute of the token and
+safe to carry in the envelope.
+
+Registration:
+
+```csharp
+builder.Services.AddBseFramework()
+    .AddBseAuthRpcIntegration();   // registers BseUserRpcEnvelopeScope + BseUserOutgoingEnvelopeDecorator
+```
+
+Both are registered as singletons. The method ensures `AddBseAuth()` has been called first.
+
+#### Per-Handler Authorization Gate (`Bse.Framework.Rpc`, ADR-0014)
+
+Handlers are marked declaratively:
+
+```csharp
+[BseRpcHandler("students.get")]
+[RequiresAuthentication]
+public sealed class GetStudentHandler : IRpcHandler<GetStudentRequest, GetStudentResponse>
+{ ... }
+```
+
+The source generator (`Bse.Framework.SourceGenerators`) detects `[RequiresAuthentication]` on
+the handler class at compile time and emits `requiresAuthentication: true` into the generated
+`HandlerDescriptor`:
+
+```csharp
+public sealed record HandlerDescriptor(
+    string Method,
+    Type   RequestType,
+    Type?  ResponseType,
+    Type   HandlerType,
+    Func<IServiceProvider, JsonElement, CancellationToken, ValueTask<JsonElement?>> Invoker,
+    bool   RequiresAuthentication = false);
+```
+
+At runtime, `AuthenticationInvocationFilter` — an `IRpcInvocationFilter` registered inside
+`Bse.Framework.Rpc` with no dependency on `Bse.Framework.Auth` — runs as the first step of
+the invocation-filter pipeline:
+
+```csharp
+public ValueTask<RpcError?> BeforeInvokeAsync(RpcInvocationContext context, CancellationToken ct)
+{
+    if (context.Descriptor.RequiresAuthentication && context.Envelope.UserId is null)
     {
-        var group = context.AddGroup("Students", "Student Management");
-        group.AddPermission(View, "View students");
-        group.AddPermission(Create, "Create students").RequirePermission(View);
-        group.AddPermission(Edit, "Edit students").RequirePermission(View);
-        group.AddPermission(Delete, "Delete students").RequirePermission(Edit);
-        group.AddPermission(Enroll, "Enroll students").RequirePermission(Edit);
+        return new ValueTask<RpcError?>(new RpcError(
+            RpcErrorCodes.Unauthenticated,
+            "This method requires an authenticated caller."));
     }
+    return new ValueTask<RpcError?>((RpcError?)null);
 }
 ```
 
-### Authorization Built on ASP.NET Core (Not Parallel)
+The filter runs after the inbound envelope scope has been pushed (so `IBseUserAccessor.Current`
+is already populated) but before the handler is resolved from DI. A rejected call never
+allocates a DI scope.
 
-Every `[RequirePermission("Students.View")]` becomes a registered ASP.NET Core policy. This composes with:
-- `[Authorize(Policy = "Students.View")]` on controllers
-- `.RequireAuthorization("Students.View")` on minimal APIs
-- SignalR hub authorization
-- Blazor `AuthorizeView` components
+The check uses `envelope.UserId is null` rather than `accessor.Current.IsAuthenticated` so that
+the filter remains independent of the Auth package and testable without it.
 
-```csharp
-[RpcMethod]
-[RequirePermission(StudentPermissions.Enroll)]
-public async Task<EnrollmentResult> Enroll(EnrollRequest request) { ... }
+### Data Flow
+
+```
+ Browser / API client
+        │  JWT (Bearer)
+        ▼
+ BSE.Common UseAuthentication
+ BSE.Common UseAuthorization
+        │  ClaimsPrincipal
+        ▼
+ BseAuthUserMiddleware
+        │  IBseUserAccessor.Push(BseUser{...all claims...})
+        ▼
+ Application code / Controller
+        │  RPC call via IRpcClient
+        ▼
+ BseUserOutgoingEnvelopeDecorator
+        │  envelope with { UserId=..., UserCode=... }
+        ▼
+ Transport (Redis Streams / HTTP)
+        │  TransportMessage.UserId + .UserCode
+        ▼
+ Downstream Service — RpcDispatcher
+        │  BseUserRpcEnvelopeScope.Push(minimalUser)
+        │  IBseUserAccessor.Current = BseUser{UserId, UserCode, IsAuthenticated=true}
+        ▼
+ AuthenticationInvocationFilter
+        │  if RequiresAuthentication && UserId is null → RpcError(-32006)
+        ▼
+ Handler.HandleAsync(request, ct)
+        │  accessor.Current.UserCode   ← available without any extra lookup
+        ▼
+ Response
 ```
 
-Wildcard support:
-- `"Students.*"` matches `Students.View`, `Students.Create`, etc.
-- `"*"` is super-admin (matches everything)
-
-#### Resource-Based Authorization
+### Configuration
 
 ```csharp
-public class StudentEditHandler : AuthorizationHandler<StudentEditRequirement, Student>
-{
-    protected override Task HandleRequirementAsync(
-        AuthorizationHandlerContext context,
-        StudentEditRequirement requirement,
-        Student student)
+// HTTP service (with JWT)
+builder.Services.AddBseFramework()
+    .AddBseAuthJwt(configuration)          // JWT + security primitives (default)
+    .AddBseAuthRpcIntegration();           // propagation decorators
+
+// Worker / consumer (RPC only, no HTTP)
+builder.Services.AddBseFramework()
+    .AddBseAuth()                          // accessor only
+    .AddBseAuthRpcIntegration();
+
+// Custom JWT options
+builder.Services.AddBseFramework()
+    .AddBseAuthJwt(configuration, jwt =>
     {
-        if (context.User.HasPermission("Students.Edit") &&
-            student.BranchId == context.User.GetClaim<string>("BranchId"))
-        {
-            context.Succeed(requirement);
-        }
-        return Task.CompletedTask;
-    }
-}
-```
-
-### Token Architecture
-
-#### User Sessions (Opaque Tokens)
-
-- **Format:** `bse_session_<32 bytes base64url>` from `RandomNumberGenerator.GetBytes(32)` (CSPRNG)
-- **Storage:** Redis with key = `SHA256(token)` (NOT raw token — protects against Redis leak)
-- **Session data:** `{ userId, tenantId, branchId, roles, permissions, createdAt, expiresAt, lastActivityAt, ipAddress, userAgentHash }`
-- **TTL:** Configurable (default 8h sliding + 12h absolute)
-- **Revocation:** Delete Redis key → instant logout
-- **Session fixation prevention:** Regenerate token ID on EVERY privilege change (login, MFA step-up, role change, impersonation, password change)
-
-#### Service-to-Service (JWT)
-
-- **Algorithm:** EdDSA (Ed25519) preferred → ES256 → PS256 → RS256 (`alg` pinned on verifier, `none` rejected)
-- **Lifetime:** 5 minutes
-- **Signing:** Asymmetric, JWKS endpoint per service
-- **Key rotation:** Every 90 days, old + new keys in JWKS during overlap
-- **Claims:** `sub`, `tenant`, `roles` (small list), `iss`, `aud`, `exp`, `nbf`, `iat`, `jti`, `trace_id`
-- **NOT in JWT:** Full permission sets (resolved at destination from cache)
-- **Validation:** ALL standard claims on every hop (`iss`, `aud`, `exp`, `nbf`, `jti`)
-- **Clock skew:** 60 seconds max
-- **Revocation:** `jti` denylist in Redis for sensitive operations
-
-### OpenIddict Integration
-
-OpenIddict serves as the **single OAuth 2.0/OIDC authority** for both flows. It provides:
-- `/.well-known/openid-configuration` discovery
-- `/.well-known/jwks.json` for public keys
-- `/connect/token`, `/connect/authorize`, `/connect/revoke`, `/connect/introspect`
-- Standard grants: `authorization_code+PKCE`, `client_credentials`, `refresh_token`
-- Reference tokens (opaque) AND JWT tokens issued from same authority
-- Standard `Microsoft.AspNetCore.Authentication.JwtBearer` middleware works in downstream services
-
-### Built on Microsoft.AspNetCore.Identity.Core
-
-The framework inherits Identity primitives:
-- `UserManager<TUser>` + `SignInManager<TUser>`
-- Account lockout state machine
-- Security stamp (invalidates tokens on password/role/permission changes)
-- 2FA/MFA primitives (TOTP, recovery codes, "remember device")
-- Passkey/WebAuthn support (.NET 9/10 native)
-- Token providers (email confirmation, password reset, change email)
-- Password history infrastructure
-- Concurrency stamps on user records
-
-The framework adds:
-- Custom `IUserStore` backed by existing `G_USERS` table (migration)
-- Redis session store via OpenIddict reference tokens
-- Multi-tenant scoping
-- RPC auth context propagation
-
-### MFA & Passkeys
-
-#### TOTP (RFC 6238)
-- QR code enrollment
-- 6-digit codes, 30-second window
-- 10 single-use recovery codes generated at enrollment
-- "Remember this device" cookie (encrypted, 30-day default)
-
-#### WebAuthn / Passkeys (.NET 9/10 native)
-- Phishing-resistant
-- Hardware-backed (Touch ID, Face ID, YubiKey)
-- Multiple credentials per user
-
-#### Step-Up Authentication
-- Re-auth required before sensitive operations:
-  - Changing email
-  - Granting admin roles
-  - Deleting data
-  - Configuring billing
-  - Exporting data
-- `acr_claim` in JWT/session indicates current auth level
-- Configurable per `[RequirePermission]` attribute
-
-### Password Security (NIST 800-63B-4 Compliant)
-
-- **Algorithm:** Argon2id (m=19 MiB, t=2, p=1 — OWASP minimum)
-- **Application-wide pepper** from Key Vault, applied via HMAC before Argon2id
-- **Min length:** 8 chars (user-chosen) / 6 chars (machine-generated)
-- **Max length:** ≥64 chars
-- **Allowed:** All printable ASCII + Unicode
-- **NO composition rules** (no "must have uppercase/digit/symbol")
-- **NO periodic expiration** (only on evidence of compromise)
-- **Allow paste** (password manager support)
-- **Breach check:** HIBP Pwned Passwords API via k-anonymity (SHA-1 prefix). MANDATORY by NIST.
-- **Lockout:** After 5-10 failures, progressive backoff, 15 min default (separate from rate limiting)
-- **Password history:** Last 10 hashes per user
-
-#### Password Migration from Plain Text
-
-1. Add `PasswordHash` column (nullable initially)
-2. On first successful login with old plain-text password:
-   - Hash with Argon2id
-   - Store hash in `PasswordHash`
-   - Clear plain-text `Password` column
-3. Legacy plain text encrypted at rest until cleared
-4. Read access audited
-5. Force expiry for users dormant > 6 months
-6. After migration period, reject logins without `PasswordHash`
-
-### Session Management
-
-```csharp
-public interface ISessionManager
-{
-    Task<SessionInfo> CreateSessionAsync(string userId, string tenantId,
-                                         SessionOptions options, CancellationToken ct);
-    Task<SessionInfo?> ValidateSessionAsync(string token, CancellationToken ct);
-    Task RevokeSessionAsync(string token, CancellationToken ct);
-    Task RevokeAllSessionsAsync(string userId, CancellationToken ct);  // "logout everywhere"
-    Task<IReadOnlyList<SessionInfo>> GetActiveSessionsAsync(string userId, CancellationToken ct);
-}
-```
-
-- Sliding expiration + absolute expiration
-- Concurrent session limit per device-class
-- Hijack detection via fingerprint hash (UA + Accept-Language + stable cookie), NOT raw IP
-- Mismatch → soft challenge (re-MFA), not hard revoke
-- Resilience: Redis Sentinel/Cluster, fail-closed on Redis unavailable for write paths
-
-### API Key Authentication
-
-```
-Format:    bse_live_<32 bytes base64url>
-           Prefix readable for debugging
-           Registered with GitHub secret scanning partner program
-
-Storage:   SHA-256 hash only (NOT Argon2id — too slow per request)
-           Constant-time equality comparison
-           Show full key only at creation, never again
-
-Features:
-  - Per-key scopes/permissions
-  - Per-key expiry
-  - Last-used timestamp
-  - IP allowlist (optional)
-  - Tenant binding
-  - Per-key rate limits
-  - All uses audited
-  - Revocation API
-  - Rotation with overlap window
-```
-
-### Audit Logging (OWASP Top 10:2025 A09)
-
-First-class events with stable schema:
-
-```
-auth.login.success / auth.login.failure (with reason code)
-auth.logout / auth.logout_everywhere
-auth.session.created / .revoked / .expired
-auth.mfa.enrolled / .success / .failure
-auth.password.changed / .reset_requested / .reset_completed
-auth.permission.denied (required permission, user, resource)
-auth.role.assigned / .revoked
-auth.permission.granted / .revoked
-auth.impersonation.started / .ended
-auth.api_key.created / .used / .revoked
-auth.token.issued / .revoked
-auth.account.locked / .unlocked
-```
-
-#### Storage
-
-- Append-only, separate from application DB
-- Partitioned audit table with no UPDATE/DELETE grants
-- OR external SIEM/OpenSearch
-- Each event tagged with `TraceId`, `CorrelationId`, `RequestId`
-
-#### Never Logged
-
-- Passwords, full tokens, OTP codes, secrets
-- Log token IDs (`jti`, `SHA256(session_id)`)
-
-#### Alerting
-
-Required by ASVS 5.0 V7. Alert on:
-- Brute force / credential stuffing
-- Privilege escalation
-- New geo location / impossible travel
-- Mass permission changes
-
-### Auth Context Propagation in RPC
-
-```
-When Service A calls Service B via RPC:
-
-1. AuthContextMiddleware (Service A outbound):
-   - Mints short-lived JWT from current ICurrentUser claims
-   - Signs with service signing key
-   - Attaches to TransportMessage.Auth
-
-2. AuthContextMiddleware (Service B inbound):
-   - Extracts JWT from TransportMessage.Auth
-   - Validates signature (no Redis lookup)
-   - Populates ICurrentUser and ITenantContext
-   - ClaimsPrincipal available — standard .NET [Authorize] works
-
-3. Zero-trust:
-   - Each service validates JWT independently
-   - Service signing keys rotated via configuration
-   - Tenant context flows automatically
-```
-
-### Service-to-Service Mutual Auth
-
-Threat: A malicious internal service could mint tokens claiming to represent any user.
-
-Mitigations:
-- mTLS between services (transport-level mutual auth)
-- OR all S2S JWTs signed by central authority (OpenIddict), not self-signed
-- SPIFFE/SPIRE for service identity (optional, advanced)
-- Service identity verified before accepting impersonation claims
-- Audit log includes both real service identity AND claimed user identity
-
-### Multi-Tenant CORS
-
-```csharp
-public class TenantCorsPolicyProvider : ICorsPolicyProvider
-{
-    public async Task<CorsPolicy?> GetPolicyAsync(HttpContext context, string? policyName)
-    {
-        var tenant = await _tenantResolver.ResolveAsync(context);
-        var origin = context.Request.Headers["Origin"].ToString();
-
-        // Validate origin matches a registered tenant origin (prevents reflective bug)
-        if (!tenant.AllowedOrigins.Contains(origin))
-            return null;
-
-        return new CorsPolicyBuilder()
-            .WithOrigins(origin)
-            .AllowCredentials()
-            .SetPreflightMaxAge(TimeSpan.FromSeconds(7200))  // Chrome max
-            .Build();
-    }
-}
-```
-
-- Response always sets `Vary: Origin` (prevents cache poisoning)
-- Never `AllowAnyOrigin()` + `AllowCredentials()` together
-- Per-tenant allowed origins list
-
-### Rate Limiting
-
-```csharp
-services.AddBseAuth(auth => {
-    auth.RateLimiting(limits => {
-        limits.PerUser(requests: 100, window: TimeSpan.FromMinutes(1));
-        limits.PerTenant(requests: 1000, window: TimeSpan.FromMinutes(1));
-        limits.LoginEndpoint(attempts: 5, window: TimeSpan.FromMinutes(15));
+        jwt.ConfigureAuth(options => { options.RequireHttpsMetadata = false; });
+        jwt.UseSecurity();
     });
-});
 ```
 
-- .NET 8's `System.Threading.RateLimiting`
-- Sliding window (Lua-atomic in Redis)
-- Redis-backed for distributed enforcement
-- Response headers: `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`
-- Bypass list: health checks, internal probes, observability scrapes
+The `JWT` configuration section (key, issuer, audience) and the `BSE:Security` section
+(encryption parameters, hashing) are read by BSE.Common, not by this package. See BSE.Common
+documentation for the full schema.
 
-### XSS Defense
+### Error Handling
 
-Input sanitization is NOT the right control (fragile, mangles legitimate data).
+| Condition | Exception | `ErrorCode` | HTTP | RPC |
+|---|---|---|---|---|
+| No credentials / expired / bad signature | `BseAuthenticationException` | `AuthenticationRequired` | 401 | -32006 |
+| Authenticated but lacks permission | `BseAuthorizationException` | `Forbidden` | 403 | -32007 |
 
-Correct controls:
-1. Output encoding at rendering boundary (Razor + React both do this automatically)
-2. Strong CSP header (`default-src 'self'`, `script-src` with nonces)
-3. Where untrusted HTML must render: explicit DOMPurify-equivalent at the sink
-4. Never use string interpolation into HTML
+`BseAuthenticationException` and `BseAuthorizationException` are defined in
+`Bse.Framework.Core.Exceptions` and extend `BseException`. Neither carries sensitive
+information (token values, key material) in the message — only a human-readable reason.
 
-### SQL Injection Defense
+The built-in `AuthenticationInvocationFilter` returns a `RpcError(RpcErrorCodes.Unauthenticated,
+...)` directly rather than throwing, so the dispatcher surfaces the error as a well-formed
+JSON-RPC error response without an exception allocation.
 
-Roslyn analyzer enforces "impossible by construction":
-- Detects string concatenation in `[Query("...")]` attributes → compile error
-- Detects raw SQL outside the data layer → compile warning
-- Detects `FormattableString` interpolation in EF `SqlQueryRaw` → compile error
-- Allowlist: explicit `[TrustedRawSql]` attribute for migration scripts only
+### Security Considerations
 
-### Encryption at Rest
+**Minimal identity over the wire.** Envelope propagation carries only `UserId` and `UserCode`.
+Roles, claims, `CompCode`, `BraCode`, and `FinYear` are intentionally excluded. This limits the
+blast radius of a rogue upstream service: it cannot forge a high-privilege identity in the
+envelope, because the downstream handler re-fetches authoritative roles from the auth backend
+when it needs them. This aligns with the NIST SP 800-63B principle of assurance-level-appropriate
+credential binding.
 
-`Microsoft.AspNetCore.DataProtection`:
-- Used for SHORT-LIVED purpose-bound payloads only (cookies, anti-forgery tokens, password reset tokens)
-- NOT for database encryption at rest
+**No-overwrite guard.** The outgoing decorator skips stamping when `envelope.UserId is not null`.
+Background jobs can synthesize a service-identity user and stamp it explicitly without risk of
+it being overwritten by the accessor slot.
 
-Database encryption at rest:
-- SQL Server: Always Encrypted (column-level) or TDE (database-level)
-- PostgreSQL: pgcrypto for column encryption, LUKS/dm-crypt for disk
-- Key management: Azure Key Vault, AWS KMS, HashiCorp Vault
-- Framework provides `IFieldEncryptor` abstraction
+**Unauthenticated vs. Forbidden.** The `-32006`/`-32007` distinction is explicit and maps to
+HTTP 401/403 semantics: `-32006` means "we don't know who you are"; `-32007` means "we know
+who you are but you can't do this". Clients must not treat them interchangeably.
 
-### Security Headers
+**AsyncLocal isolation.** `AsyncLocal<T>` propagates into child contexts but not into sibling
+tasks spawned after the parent's context is set. A `Task.Run` body inside a request sees the
+correct user; a fire-and-forget task started before authentication completes sees `BseUser.Empty`.
+This is the intended behaviour — ambient identity should not leak across logical boundaries.
 
-Applied by middleware:
-- `Strict-Transport-Security` (HSTS)
-- `X-Content-Type-Options: nosniff`
-- `X-Frame-Options: DENY`
-- `Content-Security-Policy`
-- `Referrer-Policy: strict-origin-when-cross-origin`
+**Downstream re-fetch requirement.** Services receiving a propagated identity receive a `BseUser`
+with empty `Roles`, `Claims`, and `Extensions`. Any code that gates access on roles must re-fetch
+the full user from the auth backend. Structural enforcement: the reconstructed `BseUser` has
+empty collections, so a naive `user.Roles.Contains("admin")` check reliably returns `false`.
 
-### Tenant Impersonation (Distinct from Cross-Tenant Ops)
+### Observability
+
+`BseLogScopes` (in `Bse.Framework.Core.Logging`) defines the canonical structured-log keys:
 
 ```csharp
-public interface IImpersonationContext
-{
-    Task<ImpersonationSession> StartAsync(
-        string targetTenantId,
-        string? targetUserId,
-        string reason,
-        TimeSpan duration,
-        CancellationToken ct);
-    Task EndAsync(string sessionId, CancellationToken ct);
-}
+public const string UserIdKey = "UserId";
 ```
 
-Process:
-1. Support engineer requests with reason
-2. Approval mechanism: customer admin clicks approve / auto-approved with notification / senior engineer break-glass
-3. Time-limited token (1h default, 8h max), JWT contains BOTH support engineer AND impersonated user
-4. UI shows persistent banner: "You are impersonating X"
-5. Read-only by default; write requires additional approval
-6. Two audit records per action (real engineer + impersonated user)
-7. Cannot impersonate suspended/deleted tenants
-8. Cannot change password/MFA/permissions via impersonation
+The RPC dispatcher calls `BseLogScopes.Request(traceId, spanId, correlationId, tenantId, userId)`
+and begins a log scope for every dispatch, enriching every log line emitted by the handler with
+`UserId` and `UserCode`. No additional configuration is required.
 
-### Break-Glass Recovery
+### Testing Strategy
 
-Emergency super-admin access path:
-- Bootstrap admin credential stored in Key Vault (not database)
-- Requires physical access to deployment infrastructure
-- Bypasses Redis (works when session store down)
-- Every use generates pager alert + audit
-- Time-limited (1h max)
-- Forces password rotation after use
+Three test projects cover the auth stack:
 
-### CI Security Gates
+- `Bse.Framework.Auth.Tests` — unit tests for `AsyncLocalBseUserAccessor`: slot isolation across
+  parallel tasks, restore-on-dispose, double-dispose safety, and `BseUser.Empty` identity.
+- `Bse.Framework.Auth.Jwt.Tests` — unit tests for `BseAuthUserMiddleware`: each claim mapping
+  path, non-numeric `comp_code` → `null`, `ext_*` prefix stripping, unauthenticated principal
+  no-op, and `uid`/`NameIdentifier` fallback order.
+- `Bse.Framework.Auth.Rpc.Tests` — unit tests for `BseUserRpcEnvelopeScope` and
+  `BseUserOutgoingEnvelopeDecorator`: null-envelope no-op, authenticated stamping, no-overwrite
+  guard, and minimal-user reconstruction.
 
-Required in pipeline:
-- `dotnet list package --vulnerable --include-transitive` (fail on High/Critical)
-- Semgrep with .NET ruleset OR CodeQL OR SonarCloud
-- Gitleaks for secret scanning
-- GitHub secret scanning partner registration for `bse_live_` prefix
-- Penetration testing annually + after major auth changes
-- Threat model document (STRIDE) for auth boundary
-- Fuzz testing JWT validator + JSON-RPC dispatcher
-- ASVS L2 coverage matrix maintained
-
-Cryptographic agility:
-- Algorithm names in configuration, not code
-- Argon2id parameters configurable
-- JWT alg configurable
-- Rotate without redeploying
+End-to-end coverage is provided by `TenantAndUserRpcPropagationTests` in
+`Bse.Framework.Testing.Tests`, which exercises a two-service in-memory rig: Service A
+authenticates a user, makes an RPC call, and Service B's handler asserts that
+`IBseUserAccessor.Current` contains the expected `UserId` and `UserCode`.
 
 ## Migration Path
 
-| Current Pattern | Framework Replacement |
+The primary migration target is the legacy DES-token pattern:
+
+| Legacy pattern | Framework replacement |
 |---|---|
-| `SecuritySystem.Encrypt(GUID, "Business-Systems")` | OpenIddict reference token + Argon2id hash |
-| `CheckUser(Token, UserCode)` in every controller | `[Authorize(Policy = "...")]` + `IAuthorizationHandler` |
-| `[AllowAnonymous]` everywhere | Secure by default, anonymous opt-in |
-| `G_USERS.Tokenid` | Redis session store via OpenIddict |
-| `G_USERS.Password` plain text | Argon2id + HIBP breach check |
-| DES with hardcoded key | Database TDE/Always Encrypted + Key Vault |
-| No MFA | TOTP + WebAuthn passkeys via Identity.Core |
-| No audit | Full auth event taxonomy with SIEM integration |
-| 8h token, no refresh | OAuth2 refresh tokens with rotation |
-| Manual `CompCode` extraction | `ICurrentUser.TenantId` from validated claims |
-| No rate limiting | Redis-backed sliding window |
-| Open CORS `*` | Tenant-scoped CORS policy provider |
-| No API keys | First-class API key auth scheme |
+| `SecuritySystem.Encrypt(GUID, "Business-Systems")` | BSE.Common `ITokenGenerator` (JWT) via `AddBseAuthJwt` |
+| `CheckUser(Token, UserCode)` in every controller action | `[RequiresAuthentication]` on the RPC handler + `IBseUserAccessor.Current` |
+| Manual `CompCode` extraction from session table | `IBseUserAccessor.Current.CompCode` (mapped from `comp_code` JWT claim) |
+| `UserCode ?? UserId` fallback string in every service | Explicit `UserId` / `UserCode` pair on `IBseUser`; no null-coalescing required |
+| Hand-rolled propagation through method parameters | `BseUserOutgoingEnvelopeDecorator` stamps automatically; `BseUserRpcEnvelopeScope` restores automatically |
+
+Steps for an existing HTTP service:
+
+1. Replace `AddBseAuth(configuration)` (BSE.Common extension) with
+   `.AddBseFramework().AddBseAuthJwt(configuration)`.
+2. Replace `app.UseBseAuth()` with `app.UseBseAuthJwt()`.
+3. Inject `IBseUserAccessor` in place of direct `HttpContext.User` access.
+4. Add `[RequiresAuthentication]` to handlers that previously called `CheckUser()`.
+5. If calling downstream services via RPC, add `.AddBseAuthRpcIntegration()` to DI.
+
+## Open Questions
+
+**Policy-based authorization.** `[RequiresAuthentication]` is the coarse gate — it verifies
+that a caller is known but does not check what they are allowed to do. A `[RequiresPolicy]`
+attribute (or `[RequiresRole]`) that plugs into the same invocation-filter pipeline is designed
+but not yet built. When it is, `AuthenticationInvocationFilter` will be joined by an
+`AuthorizationInvocationFilter` that evaluates the policy against `IBseUserAccessor.Current`.
+Handlers that need fine-grained access control must implement their own checks for now.
+
+**Role propagation.** The deliberate decision not to propagate roles cross-process means services
+with frequent inter-service calls may see elevated latency from repeated auth-backend lookups.
+A read-through cache keyed on `UserId` with a short TTL (aligned to token lifetime) is the
+expected mitigation, but no framework-provided cache exists yet.
+
+**Token-lifetime alignment.** The inbound scope reconstructs a user with `IsAuthenticated=true`
+for the duration of the handler. There is no check that the original JWT has not expired between
+the envelope being stamped and the handler running. For same-datacenter calls this window is
+negligible; for queued or deferred RPC calls it may be significant. Envelope deadline
+enforcement (`RpcErrorCodes.DeadlineExceeded`) partially mitigates this but does not verify
+token validity independently.
 
 ## References
 
-- ADR-0004
-- NIST SP 800-63B-4: https://csrc.nist.gov/pubs/sp/800/63/b/4/final
+- ADR-0004: Hybrid Authentication — Opaque Tokens for Users + JWT for Services
+- ADR-0008: Source Generator Automation (`[RequiresAuthentication]` compile-time wiring)
+- RFC-0001: BSE Framework Overview
+- RFC-0002: RPC and Distributed Computing
+- RFC-0006: Multi-Tenancy (parallel envelope propagation pattern)
+- NIST SP 800-63B-4 (July 2025): https://csrc.nist.gov/pubs/sp/800/63/b/4/final
+- OAuth 2.0 (RFC 6749) / OIDC Core 1.0
+- ASP.NET Core Identity: `Microsoft.AspNetCore.Identity.Core`
+- AsyncLocal&lt;T&gt; propagation semantics: https://docs.microsoft.com/en-us/dotnet/api/system.threading.asynclocal-1
 - OWASP ASVS 5.0
-- OWASP Top 10:2025
-- OpenIddict: https://documentation.openiddict.com/
-- Microsoft.AspNetCore.Identity.Core
-- Have I Been Pwned Pwned Passwords API
-- Argon2id (RFC 9106)

@@ -1,70 +1,131 @@
-# ADR-0005: OpenTelemetry → Grafana Stack for Observability
+# ADR-0005: OpenTelemetry → Grafana Stack
 
 - **Status:** Accepted
 - **Date:** 2026-04-06
+- **Deciders:** BSE Framework Team
 - **Tags:** observability, telemetry, opentelemetry, grafana
 
 ## Context
 
 The existing BSE apps have inconsistent or absent observability:
-- **Stud2/Orange2:** No logging framework at all
-- **SafePack2:** Prometheus metrics only (no traces, no logs)
 
-There is no distributed tracing, no centralized logging, no structured log search, and no dashboards. Debugging production issues requires SSH access and `tail -f` on log files. We need a unified observability stack that supports the framework's distributed RPC architecture.
+- **Stud2 / Orange2:** No logging framework at all — debugging requires SSH and `tail -f`.
+- **SafePack2:** Prometheus metrics only; no distributed traces, no structured log search.
+
+There is no distributed tracing, no centralized log aggregation, and no cross-signal correlation.
+The framework's distributed RPC architecture (Redis Streams, HTTP, In-Memory transports) makes
+this gap severe: a failed request can span multiple services and there is no way to follow it
+without per-service log inspection.
+
+All three signal types (traces, metrics, logs) were needed in a single coherent system with
+low operational overhead for Docker-based deployments.
 
 ## Decision
 
-Use **OpenTelemetry SDK** for instrumentation, exporting via **OTLP** to an **OpenTelemetry Collector**, which routes to a **Grafana stack**:
-- **Tempo** for traces
-- **Loki** for logs
-- **Prometheus / Mimir** for metrics
-- **Grafana** for visualization
+Instrument with the **OpenTelemetry .NET SDK** for all three signals and export via **OTLP** to
+the **Grafana observability stack**:
 
-For multi-tenant deployments (>100 tenants), use **Mimir** (multi-tenant Prometheus) instead of vanilla Prometheus.
+- **Tempo** for distributed traces
+- **Loki** for structured logs
+- **Prometheus / Mimir** for metrics
+
+The framework ships `Bse.Framework.Telemetry` with three internal pipelines — `TracingPipeline`,
+`MetricsPipeline`, and a logging pipeline — configured by `BseTelemetryOptions`.
+
+Key as-built choices verified against source:
+
+- **Head sampling:** `ParentBased(TraceIdRatioBased(ratio))` — child services honour upstream
+  sampling decisions; ratio defaults to `1.0` (sample everything).
+- **PII redaction:** `RedactingSpanProcessor` runs `ISensitiveDataRedactor` on every span tag at
+  `OnEnd`; `QueryStringRedactor` strips OAuth codes, reset tokens, and API keys from `url.query`
+  and `url.full` in ASP.NET Core and HttpClient instrumentation.
+- **Base-2 exponential histograms:** `MetricsPipeline` applies a blanket `AddView` that returns
+  `Base2ExponentialBucketHistogramConfiguration` for every histogram instrument, providing better
+  dynamic range and ~10x storage savings over fixed buckets.
+- **OTLP transport:** a single `OtlpEndpoint` (defaults to `OTEL_EXPORTER_OTLP_ENDPOINT` or
+  `localhost:4317` gRPC) covers all three signals.
+
+```csharp
+// TracingPipeline.Configure (excerpt)
+traceProvider
+    .SetSampler(new ParentBasedSampler(
+        new TraceIdRatioBasedSampler(options.Traces.SamplingRatio)))
+    .AddAspNetCoreInstrumentation(o =>
+    {
+        o.EnrichWithHttpRequest = (activity, _) =>
+            QueryStringRedactor.RedactActivityTags(activity);
+    });
+
+// MetricsPipeline.Configure (excerpt)
+meterProvider.AddView(instrument =>
+{
+    if (instrument.GetType().Name.Contains("Histogram", StringComparison.Ordinal))
+        return new Base2ExponentialBucketHistogramConfiguration();
+    return null;
+});
+```
 
 ## Options Considered
 
-### Option A: OpenTelemetry Collector → Grafana Stack
-- **Pros:** Open source, self-hosted, Docker-friendly, single collector receives all signals, OTel is vendor-neutral standard, OTLP enables export to any backend later
-- **Cons:** Requires running collector + 3-4 backends, operational overhead
+### Option A: Per-signal bespoke stack (DB logs / Prometheus only)
+- **Pros:** Familiar to teams already running Prometheus; no new vendor.
+- **Cons:** No distributed tracing; logs stay on disk; no cross-signal correlation; cannot follow
+  a request across RPC hops.
 
-### Option B: OpenTelemetry Collector → Jaeger + Prometheus + ELK
-- **Pros:** Traditional stack, Jaeger is mature for traces, ELK widely adopted for logs
-- **Cons:** Multiple separate UIs, no unified visualization, ELK is heavy
+### Option B: Vendor APM (Datadog, New Relic, Azure Monitor)
+- **Pros:** Managed, turnkey dashboards, no infrastructure to operate.
+- **Cons:** Vendor lock-in, cost at scale (per-host pricing), PII data leaves the environment,
+  incompatible with BSE's on-premises deployment requirement.
 
-### Option C: Backend-Agnostic (OTel SDK Only)
-- **Pros:** Maximum flexibility, customers configure their own backends
-- **Cons:** No default deployment, harder onboarding, no pre-built dashboards
+### Option C: OpenTelemetry → Grafana Stack (chosen)
+- **Pros:** Open source, self-hosted, Docker Compose-friendly; OTLP is vendor-neutral so backends
+  can be swapped without touching application code; Grafana unifies all three signals in one UI
+  with exemplar links (metric → trace → log); pre-built dashboards ship with the framework.
+- **Cons:** 4–5 services to operate (OTel Collector + Tempo + Loki + Prometheus + Grafana);
+  cardinality discipline required (high-cardinality labels must not go to Prometheus directly);
+  tail sampling needs a two-tier collector pattern.
 
 ## Rationale
 
-Approach A gives us a default deployment that works out of the box (Docker Compose) while remaining flexible (OTLP enables swapping to Datadog, Azure Monitor, etc.). The Grafana stack is open source, has the best correlation experience between signals (click a metric → jump to trace → jump to logs), and supports multi-tenancy via `X-Scope-OrgID`. Pre-built Grafana dashboards ship with the framework.
+Option C provides the distributed tracing the RPC architecture requires while staying open source
+and on-premises. The Grafana ecosystem has the strongest cross-signal correlation story: clicking
+an anomalous metric data point can jump to the matching trace, and from there to the correlated
+log lines via Loki. OTLP as the single export protocol means a future move to Datadog or Azure
+Monitor requires only a Collector config change, not application code changes.
+
+The PII redaction requirement is met entirely at the SDK layer (`RedactingSpanProcessor`,
+`QueryStringRedactor`) so no sensitive data reaches the Collector or any backend.
 
 ## Consequences
 
 ### Positive
-- Three pillars (logs, traces, metrics) unified in one UI
-- Distributed tracing across all framework services via W3C Trace Context propagation
-- Pre-built dashboards ship with framework
-- Vendor-agnostic via OTLP — easy to swap backends
-- Per-tenant observability via Mimir/Loki/Tempo `X-Scope-OrgID`
-- Exemplars link metrics to traces
-- Auto-instrumentation in every framework package
+- All three observability pillars unified in Grafana with exemplar-based cross-signal navigation.
+- Distributed traces follow requests across Redis Streams and HTTP transports via W3C Trace Context
+  propagation (set as the default `TextMapPropagator`).
+- Base-2 exponential histograms improve storage efficiency without pre-defining bucket boundaries.
+- PII redaction is automatic — application teams do not need to scrub spans manually.
+- Vendor-agnostic: OTLP endpoint is the only coupling point.
+- Auto-instrumentation for ASP.NET Core, HttpClient, EF Core, and runtime metrics included in the
+  package; consuming services opt in with a single `AddBseTelemetry()` call.
 
 ### Negative
-- 4-5 services to operate (collector + 3 backends + grafana)
-- Cardinality discipline required (tenant_id NEVER as a label without Mimir)
-- Tail sampling requires two-tier collector pattern (load-balancing exporter → tail sampling)
-- Cost management requires sampling, drop rules, retention policies
+- 4–5 services to operate in Docker Compose; production deployments need retention and cardinality
+  policies.
+- Cardinality discipline is mandatory: `tenant_id` and `user_id` must not appear as Prometheus
+  labels without Mimir (multi-tenant Prometheus).
+- Tail sampling (sample-after-seeing-the-full-trace) requires a separate two-tier Collector
+  topology with a load-balancing exporter.
 
 ### Neutral
-- Continuous profiling (Pyroscope) added as optional fourth signal
-- Audit logs are SEPARATE system (not Loki) — different retention requirements
-- Default retention: traces 7d, logs 30d, metrics 90d raw + 1y downsampled
+- Default retention guidance: traces 7 d, logs 30 d, metrics 90 d raw + 1 y downsampled.
+- Continuous profiling (Pyroscope) is an optional fourth signal not wired by default.
+- Audit logs are a separate system with different retention requirements and are not routed to Loki.
 
 ## References
 
 - RFC-0005: Telemetry and Observability
-- OpenTelemetry .NET: https://opentelemetry.io/docs/languages/dotnet/
-- Grafana stack documentation
-- OWASP Top 10:2025 A09 (Logging & Alerting Failures)
+- [`Bse.Framework.Telemetry/Tracing/TracingPipeline.cs`]
+- [`Bse.Framework.Telemetry/Metrics/MetricsPipeline.cs`]
+- [`Bse.Framework.Telemetry/Processors/RedactingSpanProcessor.cs`]
+- [`Bse.Framework.Telemetry/Options/BseTelemetryOptions.cs`]
+- OpenTelemetry .NET SDK: https://opentelemetry.io/docs/languages/dotnet/

@@ -1,99 +1,145 @@
-# ADR-0008: Roslyn Source Generators for Repository and Query Automation
+# ADR-0008: Roslyn Source-Generator Handler Registration
 
 - **Status:** Accepted
 - **Date:** 2026-04-06
-- **Tags:** source-generators, automation, boilerplate-elimination
+- **Deciders:** BSE Framework Team
+- **Tags:** source-generators, rpc, compile-time, roslyn
 
 ## Context
 
-The existing BSE apps require massive amounts of boilerplate:
-- **240+ manual service registrations** in `IocConfigurator.cs` (SafePack2)
-- **40-90 hand-written repository implementations** per app
-- **100+ hand-written `[Query("SQL")]` methods** with parameter binding
-- **Manual SQL parameterization** (frequently forgotten → SQL injection)
-- **Manual pagination wrapping** (inconsistent across apps)
+The existing BSE apps require massive amounts of boilerplate: 240+ manual service registrations in
+`IocConfigurator.cs` (SafePack2), 40–90 hand-written repository implementations per app, and
+manual wiring of RPC handlers to dispatcher method tables. Adding a new RPC handler required
+editing two files: the handler class and the DI registration. Forgetting the second file produced
+a runtime error with no compile-time signal.
 
-We need automation that eliminates this boilerplate without runtime reflection overhead and with compile-time safety.
+The framework needed a way to register RPC handlers automatically without runtime reflection
+(incompatible with AOT) and without T4 templates (drift problem). Compile-time registration also
+enables compile-time validation — catching structural mistakes (wrong interface, abstract class,
+duplicate method name) before the service starts.
 
 ## Decision
 
-Use **Roslyn Source Generators** to automatically generate:
-1. **EF Core repositories** for entities marked with `IEntity`
-2. **Dapper query implementations** from `[Query]`-attributed interfaces
-3. **DI registrations** for all generated repositories and query services
-4. **Pagination wrapping** via `[Paginated]` and `[KeysetPaginated]` attributes
-5. **Strongly-typed ID** value converters and Dapper type handlers
+An **incremental Roslyn source generator** (`BseRpcHandlerGenerator`,
+`IIncrementalGenerator`) discovers every class annotated with
+`[BseRpcHandler("method.name")]` and emits a single `AddBseRpcGeneratedHandlers` extension
+method on `BseRpcBuilder` in a generated file `BseGeneratedRpcRegistrations.g.cs`. Each
+discovered handler produces one call to `AddHandler<THandler, TRequest, TResponse>(builder, "method")`
+for request/response handlers, or `AddNotificationHandler<THandler, TRequest>(builder, "method")`
+for notification handlers.
+
+Authentication gating is opt-in per handler: adding `[RequiresAuthentication]` alongside
+`[BseRpcHandler]` causes the generator to emit `requiresAuthentication: true` in the registration
+call. The runtime `AuthenticationInvocationFilter` then rejects unauthenticated envelopes with a
+typed `Unauthenticated` (JSON-RPC code –32006) error before the handler runs.
+
+The generator emits diagnostics BSE0001–BSE0006 for structural violations:
+
+| Code | Severity | Condition |
+|------|----------|-----------|
+| BSE0001 | Error | Class implements both `IRpcHandler<,>` and `IRpcNotificationHandler<>` |
+| BSE0002 | Error | Class implements neither interface |
+| BSE0003 | Error | `[BseRpcHandler]` method name is empty |
+| BSE0004 | Error | Handler class is abstract |
+| BSE0005 | Error | Handler class is generic |
+| BSE0006 | Error | Multiple closed forms of the same interface on one class |
+
+```csharp
+// Attribute declaration (Bse.Framework.SourceGenerators.Attributes)
+[AttributeUsage(AttributeTargets.Class, Inherited = false, AllowMultiple = false)]
+public sealed class BseRpcHandlerAttribute : Attribute
+{
+    public BseRpcHandlerAttribute(string method) { Method = method; }
+    public string Method { get; }
+}
+
+[AttributeUsage(AttributeTargets.Class, Inherited = false, AllowMultiple = false)]
+public sealed class RequiresAuthenticationAttribute : Attribute { }
+
+// Example usage
+[BseRpcHandler("students.get")]
+[RequiresAuthentication]
+public sealed class GetStudentHandler : IRpcHandler<GetStudentRequest, GetStudentResponse>
+{
+    public Task<GetStudentResponse> HandleAsync(GetStudentRequest req, CancellationToken ct)
+        => ...;
+}
+
+// Generated output (excerpt)
+public static BseRpcBuilder AddBseRpcGeneratedHandlers(this BseRpcBuilder builder)
+{
+    BseRpcBuilderHandlerExtensions
+        .AddHandler<GetStudentHandler, GetStudentRequest, GetStudentResponse>(
+            builder, "students.get", requiresAuthentication: true);
+    return builder;
+}
+```
+
+The generator implements `IIncrementalGenerator` (not the older `ISourceGenerator`) and captures
+only plain-data `HandlerInfo` records — not Roslyn symbols — between pipeline stages, preserving
+IDE incremental cache correctness. Discovered handlers are sorted by method name before emission
+so the output is deterministic across builds.
 
 ## Options Considered
 
-### Option A: Runtime Reflection
-- **Pros:** Simpler to implement, no build-time complexity
-- **Cons:** Runtime overhead, no AOT support, harder to debug, runtime errors instead of compile errors
+### Option A: Reflection assembly-scan at startup
+- **Pros:** Simple to implement; no build-time complexity.
+- **Cons:** Runtime overhead; incompatible with Native AOT; errors discovered at service startup
+  rather than at compile time; no compile-time validation of handler structure.
 
-### Option B: Code Templates / Scaffolding (T4)
-- **Pros:** Visible generated code, easy to customize
-- **Cons:** Generated code drifts from templates, framework updates require re-scaffolding, doesn't compose with DI
+### Option B: Manual registration
+- **Pros:** No tooling required; always visible.
+- **Cons:** Exactly the 240+ registration problem the framework must solve; forgetting a
+  registration silently drops a method from the dispatcher; no structural validation.
 
-### Option C: Roslyn Source Generators
-- **Pros:** Compile-time generation (no runtime overhead), AOT-compatible, errors caught at build time, auto-regenerates on framework updates, IDE integration (IntelliSense), eliminates entire categories of bugs (SQL injection, missing registrations)
-- **Cons:** Build-time complexity, generators must target netstandard2.0, debugging generated code requires special tooling, build performance impact if not incremental
+### Option C: Roslyn source generator (chosen)
+- **Pros:** Zero runtime overhead; AOT-compatible; structural errors (BSE0001–BSE0006) are
+  compiler errors visible in the IDE; generated file is deterministic and auditable; output
+  regenerates automatically on every build when handler classes change.
+- **Cons:** Generator targets `netstandard2.0` (compiler constraint); must use
+  `IIncrementalGenerator` for IDE performance; debugging generated code requires special tooling.
 
 ## Rationale
 
-Source generators are the modern .NET pattern (Microsoft uses them in System.Text.Json, regex, logging, etc.). They give us the automation of templates without the drift problem. Compile-time enforcement of parameterization makes SQL injection impossible by construction. Build-time DI registration eliminates the 240+ manual registration problem.
-
-The framework will build on **Dapper.AOT** (by Marc Gravell, the Dapper author) for the query side rather than reinventing parameter binding and type mapping.
+Source generators are the modern .NET pattern for eliminating registration boilerplate (Microsoft
+uses them in `System.Text.Json`, logging source generators, and regex). They give compile-time
+automation without the drift that plagues T4 templates. The `[BseRpcHandler]` + `[RequiresAuthentication]`
+attribute pair gives handler authors a clear, minimal surface: declare the method name, declare
+whether auth is required, implement the interface — the registration is generated. Runtime
+reflection assembly-scan was rejected because Native AOT is a framework design requirement and
+scan-at-startup produces runtime failures rather than compiler errors.
 
 ## Consequences
 
 ### Positive
-- Eliminates 240+ manual service registrations
-- Eliminates 40-90 hand-written repositories per app
-- SQL injection impossible by construction (compile error on string concatenation)
-- Pagination consistent across the framework via attributes
-- Strongly-typed IDs work seamlessly across EF Core, Dapper, JSON
-- AOT-compatible
-- Compile-time errors instead of runtime surprises
+- Forgetting to register a handler is a compiler error (the method simply doesn't appear in
+  the generated extension method).
+- Structural mistakes (abstract class, wrong interface, empty method name) are compiler errors
+  caught in the IDE before a build runs.
+- Auth gating (`[RequiresAuthentication]`) is declared on the handler class itself — colocated
+  with the business logic, not in a separate registration file.
+- Generated output is deterministic and diff-friendly in code review.
+- AOT-compatible by construction — no reflection at runtime.
 
 ### Negative
-- Source generators must target `netstandard2.0` (compiler runs on .NET Framework on Windows)
-- Generators must be incremental (`IIncrementalGenerator`) for IDE performance
-- Generated code is harder to debug
-- Build performance impact must be monitored
-- Cross-version compatibility between generator and runtime requires careful versioning
+- Generator must target `netstandard2.0` (the Roslyn host runs on .NET Framework on Windows).
+- `IIncrementalGenerator` pipeline design is non-trivial; Roslyn objects must not escape the
+  transform stage or IDE caching breaks.
+- Generated code is harder to step through in the debugger without `#line` directive tooling.
+- Duplicate `[BseRpcHandler("same.method")]` across two classes is a runtime
+  `BseConfigurationException` at `AddBseRpc` completion time, not a BSE diagnostic.
 
 ### Neutral
-- Generators ship in two packages: `Bse.Framework.SourceGenerators` (analyzer) + `Bse.Framework.SourceGenerators.Attributes` (runtime)
-- Generated files use `.g.cs` extension with `#line` directives for debugging
-- All generators coordinate via shared `Directory.Build.props` version
-
-## Source Generator Targets
-
-| Generator | Input | Output |
-|---|---|---|
-| `RepositoryGenerator` | Classes implementing `IEntity` | `EfRepository<T>` + DI registration |
-| `QueryGenerator` | Interfaces with `[DapperQueries]` | Dapper.AOT-based implementation + DI registration |
-| `PaginationGenerator` | Methods with `[Paginated]` | OFFSET/FETCH-wrapped SQL |
-| `KeysetPaginationGenerator` | Methods with `[KeysetPaginated]` | Cursor-based SQL |
-| `StronglyTypedIdGenerator` | Records with `[StronglyTypedId]` | EF ValueConverter + Dapper TypeHandler + JSON converter |
-| `RemoteServiceProxyGenerator` | Interfaces with `[RemoteService]` | RPC client implementation |
-| `RpcMethodRegistrationGenerator` | Methods with `[RpcMethod]` | Dispatcher registration table |
-
-## Analyzer Rules (Compile-Time Enforcement)
-
-| Rule | Severity | Detects |
-|---|---|---|
-| `BSE0001` | Error | String concatenation in `[Query("...")]` SQL |
-| `BSE0002` | Error | `[DapperQueries]` method returning `IEntity` type |
-| `BSE0003` | Error | Direct `IDistributedCache` injection in tenant-scoped service |
-| `BSE0004` | Error | `IgnoreQueryFilters()` call outside `BseUnfilteredDbContext` |
-| `BSE0005` | Warning | `[RpcMethod]` without `[RequirePermission]` (security review needed) |
-| `BSE0006` | Error | High-cardinality label on metric (user_id, tenant_id without Mimir) |
+- Attributes ship in `Bse.Framework.SourceGenerators.Attributes` (consumed at runtime); the
+  generator itself ships in `Bse.Framework.SourceGenerators` (build-time only, never deployed).
+- Generated file uses the naming convention `BseGeneratedRpcRegistrations.g.cs`.
+- Handler classes are sorted alphabetically by method name in the generated output.
 
 ## References
 
-- ADR-0003: EF Core + Dapper Hybrid
-- RFC-0003: Data Access Layer
-- Dapper.AOT: https://aot.dapperlib.dev/
-- StronglyTypedId by Andrew Lock
-- Roslyn Source Generators documentation
+- RFC-0002: RPC and Distributed Computing
+- ADR-0014: RPC Per-Handler Auth Gating
+- [`Bse.Framework.SourceGenerators/BseRpcHandlerGenerator.cs`]
+- [`Bse.Framework.SourceGenerators.Attributes/BseRpcHandlerAttribute.cs`]
+- [`Bse.Framework.SourceGenerators.Attributes/RequiresAuthenticationAttribute.cs`]
+- Roslyn Incremental Generators documentation

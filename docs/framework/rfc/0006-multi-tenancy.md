@@ -1,799 +1,711 @@
 # RFC-0006: Multi-Tenancy
 
-- **Status:** Approved
-- **Date:** 2026-04-06
+- **Status:** Implemented
+- **Date:** 2026-07-05
+- **Authors:** BSE Framework Team
 - **Related ADRs:** ADR-0006
-- **Related RFCs:** RFC-0001, RFC-0003, RFC-0004, RFC-0005
+- **Related RFCs:** RFC-0001, RFC-0003, RFC-0004
+
+---
 
 ## Abstract
 
-The framework provides hybrid multi-tenancy supporting database-per-tenant, schema-per-tenant, and shared-database isolation strategies, decided per tenant. Tenant context is **ambient** (flows through DI), **automatic** (filters applied by interceptors), and **impossible to bypass** outside of explicit cross-tenant operations. Defense in depth via four layers: EF Core query filters, SaveChanges interceptor, Roslyn analyzer, and PostgreSQL Row-Level Security. Includes per-tenant Options pattern (Finbuckle-style), tenant impersonation distinct from cross-tenant ops, tenant-aware caching, sub-tenant/organization hierarchy, deployment cells for multi-region, GDPR-compliant tenant deletion, and quota enforcement.
+This document is the as-built specification for BSE multi-tenancy. It covers the ambient tenant context abstraction (`ITenantContext` / `ITenantContextAccessor`), the pluggable resolver chain, three ASP.NET Core HTTP resolvers (header, host, claim), the RPC integration that propagates tenant identity across process boundaries via `TransportMessage.TenantId`, and the EF Core isolation layer (application-side RLS via global query filters + `AuditingSaveChangesInterceptor`). The design is single-isolation-strategy (shared database, query-filter scoped), anonymous-by-default, and spread across three opt-in packages: `Bse.Framework.MultiTenancy`, `Bse.Framework.MultiTenancy.AspNetCore`, and `Bse.Framework.MultiTenancy.Rpc`.
+
+---
 
 ## Motivation
 
-The existing BSE apps have multi-tenancy via `CompCode` and `BranchCode` parameters threaded through every method call:
-- Easy to forget (security risk)
-- Easy to bypass (no enforcement)
-- Year-based database routing built into `BaseController.BuildConnectionString()`
-- Some tenants have own database, others share — handled inconsistently
-- No tenant lifecycle management
-- No quotas
-- No per-tenant configuration
-- No support for the multi-tenant patterns required by SOC 2 / HIPAA / GDPR
+The existing BSE applications propagate tenancy through a `CompCode` parameter threaded through every controller action, service method, and repository call. This approach has several known failure modes:
+
+- A developer who forgets to pass `CompCode` silently operates without tenant scope.
+- There is no enforcement layer: a caller can pass any `CompCode` value, including one belonging to a different customer.
+- Cross-process calls (messaging, batch jobs) have no standardized mechanism to carry the tenant identifier; each team solves this ad hoc.
+- Reading tenancy from `IBseUser.CompCode` conflates the user's home tenant with the request's target tenant, which breaks in cross-tenant admin scenarios and in RPC hops where the user object is not carried in full.
+
+The framework needs an ambient tenant context that propagates automatically through async call stacks, is enforced by the data layer without application-level discipline, and crosses process boundaries via the existing RPC transport envelope.
+
+---
 
 ## Goals
 
-- Ambient tenant context (no manual parameter passing)
-- Hybrid isolation strategies (database / schema / shared) per tenant
-- Defense in depth (four enforcement layers)
-- Impossible to accidentally leak data across tenants
-- Per-tenant configuration via standard Options pattern
-- Tenant lifecycle management (provision, activate, suspend, offboard, delete)
-- GDPR right-to-erasure (hard delete via crypto-shredding or DB drop)
-- Multi-region data residency via deployment cells
-- Tenant impersonation for support (distinct from admin cross-tenant ops)
-- Quota enforcement
-- Migration path from existing `CompCode`-based apps
+- Ambient tenant context backed by `AsyncLocal<T>` — no manual parameter passing.
+- Pluggable resolver chain so teams can mix header, claim, and subdomain resolution strategies in priority order.
+- ASP.NET Core middleware that resolves, validates, and scopes the tenant to each HTTP request with a single `app.UseBseMultiTenancy()` call.
+- EF Core isolation: a global query filter on every `IMultiTenant` entity so tenant-scoped queries are enforced without any application-level `WHERE` clause.
+- Defense in depth: the save-changes interceptor stamps `TenantId` on insert and throws a `BseAuthorizationException` on cross-tenant modification even if the query filter was bypassed.
+- RPC integration: `TransportMessage.TenantId` carries tenant identity across process boundaries; inbound handlers push it into the ambient accessor before handler execution.
+- Anonymous-by-default: services that do not call `AddBseMultiTenancy` are unaffected; services that opt in but do not resolve a tenant receive `TenantContext.Empty` (no `TenantId`), which causes the EF query filter to match `NULL` and return zero rows — the safe default.
 
 ## Non-Goals
 
-- Replacing Finbuckle.MultiTenant (we adopt its best ideas)
-- Building a custom OAuth provider (use OpenIddict)
-- Cross-tenant data sharing without explicit consent (federation is future work)
+- Physical database-per-tenant or schema-per-tenant isolation strategies — only shared-database query-filter isolation is implemented.
+- Finbuckle.MultiTenant-style per-tenant `IOptions<T>` branching — per-tenant configuration lives at the query-filter and entity-data layer, not at the DI options layer.
+- A tenant store, tenant lifecycle management (provisioning, suspension, GDPR deletion), or tenant quotas.
+- Per-tenant Redis streams or any transport-level tenant namespace partitioning.
+- Sub-tenant or workspace hierarchies (`IOrganizationScoped`, `IWorkspaceScoped`).
+
+---
 
 ## Design
 
-### Tenant Abstraction
+### Package Structure
+
+The implementation is split across three packages so services depend only on what they use:
+
+| Package | Depends On | Registers |
+|---|---|---|
+| `Bse.Framework.MultiTenancy` | BSE Core | `ITenantContextAccessor`, `TenantResolverChain`, `BseMultiTenancyOptions` |
+| `Bse.Framework.MultiTenancy.AspNetCore` | Core + ASP.NET Core | `TenantResolutionMiddleware`, three HTTP resolvers |
+| `Bse.Framework.MultiTenancy.Rpc` | Core + `Bse.Framework.Rpc` | `TenantRpcEnvelopeScope`, `TenantOutgoingEnvelopeDecorator` |
+
+A background service that receives tenant identity only via inbound RPC envelopes needs only Core + Rpc. An HTTP gateway needs Core + AspNetCore. A service that does both adds all three.
+
+---
+
+### Core Abstractions
+
+#### ITenantContext and TenantContext
+
+`ITenantContext` is the read-only snapshot of the tenant identity active on the current logical thread:
 
 ```csharp
+// Bse.Framework.MultiTenancy.ITenantContext
 public interface ITenantContext
 {
-    string TenantId { get; }
-    string? OrganizationId { get; }   // Sub-tenant (org within tenant)
-    string? WorkspaceId { get; }      // Project/team within org
-    TenantInfo? CurrentTenant { get; }
-    OrganizationInfo? CurrentOrganization { get; }
-    WorkspaceInfo? CurrentWorkspace { get; }
-    bool IsAvailable { get; }
+    // The resolved tenant identifier, or null when no tenant is active.
+    // Typically a slug (e.g. "acme"). Never a numeric id or GUID.
+    string? TenantId { get; }
 
-    // ABP-style scope pattern
-    IDisposable Change(string? tenantId);
+    // true when a tenant has been resolved; false for anonymous / system contexts.
+    bool HasTenant { get; }
 
-    // Async execution pattern
-    Task<T> ExecuteInTenantAsync<T>(string tenantId, Func<Task<T>> operation);
+    // Optional metadata attached by the resolver (tier, region, plan).
+    // Empty when no properties were provided; never null.
+    IReadOnlyDictionary<string, string> Properties { get; }
 }
 
-public class TenantInfo
+// Bse.Framework.MultiTenancy.TenantContext
+public sealed record TenantContext(
+    string? TenantId,
+    IReadOnlyDictionary<string, string> Properties) : ITenantContext
 {
-    public string Id { get; init; }
-    public string Name { get; init; }
-    public string? DisplayName { get; init; }
-    public TenantStatus Status { get; init; }
-    public TenantTier Tier { get; init; }                       // Free/Pro/Enterprise
-    public string? Region { get; init; }                        // For data residency
-    public string IsolationStrategy { get; init; }              // Database/Schema/Shared
-    public string? ConnectionString { get; init; }              // For database-per-tenant
-    public IReadOnlyList<string> AllowedOrigins { get; init; }  // For tenant CORS
-    public TenantQuota Quota { get; init; }
-    public Dictionary<string, object> Properties { get; init; } // Extension point
-}
+    // Shared empty context used for anonymous / system execution.
+    // HasTenant is false; TenantId is null.
+    public static readonly TenantContext Empty =
+        new(TenantId: null, Properties: new Dictionary<string, string>());
 
-public enum TenantStatus
-{
-    Provisioning,
-    Active,
-    Suspended,         // billing issue, read-only
-    Offboarding,       // 30-day grace period
-    PendingDeletion,   // grace elapsed, scheduled for hard delete
-    Deleted            // crypto-shredded or DB-dropped
+    public bool HasTenant => TenantId is not null;
 }
-
-public enum TenantTier { Free, Pro, Enterprise }
 ```
 
-### Tenant Resolution
+`TenantId` is always a `string?` slug — the framework places no constraint on format beyond being non-empty when present. Numeric identifiers and GUIDs are intentionally out-of-band; tenant slugs are stable, human-readable, and safe to log.
 
-Multiple composable resolvers (with cross-check):
+#### ITenantContextAccessor and AsyncLocalTenantContextAccessor
+
+`ITenantContextAccessor` is the ambient accessor that framework components (middleware, interceptors, RPC scopes) use to read and temporarily override the current tenant:
 
 ```csharp
+// Bse.Framework.MultiTenancy.Accessor.ITenantContextAccessor
+public interface ITenantContextAccessor
+{
+    // The tenant active on the current logical thread.
+    // Returns TenantContext.Empty when nothing has been pushed. Never null.
+    ITenantContext Current { get; }
+
+    // Scopes context to the current async execution context.
+    // The previous context is restored when the returned IDisposable is disposed.
+    // Pattern: using var scope = accessor.Push(ctx);
+    IDisposable Push(ITenantContext context);
+}
+```
+
+The production implementation, `AsyncLocalTenantContextAccessor`, is registered as a singleton. It stores the current context in a `static AsyncLocal<ITenantContext?>`, which propagates through async continuations while keeping each logical flow isolated from siblings spawned with `Task.Run`:
+
+```csharp
+public sealed class AsyncLocalTenantContextAccessor : ITenantContextAccessor
+{
+    private static readonly AsyncLocal<ITenantContext?> _current = new();
+
+    public ITenantContext Current => _current.Value ?? TenantContext.Empty;
+
+    public IDisposable Push(ITenantContext context)
+    {
+        var previous = _current.Value;
+        _current.Value = context;
+        return new RestoreScope(previous);   // restores _current.Value on Dispose()
+    }
+}
+```
+
+The inner `RestoreScope` is idempotent (double-dispose is a no-op) and handles the `using var` pattern correctly across async boundaries because `AsyncLocal<T>` writes on the current execution context flow down to child contexts but not back up to the parent — a `Push` on a child task does not pollute the parent's slot.
+
+---
+
+### Resolution Pipeline
+
+#### ITenantResolver
+
+Resolvers are single-responsibility units that attempt to identify the tenant from one source. Returning `null` signals "I cannot determine the tenant from my source; let the next resolver try":
+
+```csharp
+// Bse.Framework.MultiTenancy.Resolution.ITenantResolver
 public interface ITenantResolver
 {
-    Task<TenantInfo?> ResolveAsync(HttpContext httpContext, CancellationToken ct);
+    // Returns the resolved ITenantContext, or null to pass to the next resolver.
+    ValueTask<ITenantContext?> ResolveAsync(CancellationToken cancellationToken);
 }
+```
 
-// Built-in resolvers:
-// - HostTenantResolver        (subdomain: tenant1.bse.com)
-// - HeaderTenantResolver      (X-Tenant-Id header)
-// - ClaimTenantResolver       (JWT claim — most secure)
-// - PathTenantResolver        (/tenants/{id}/api/...)
-// - RouteTenantResolver       (route parameter {tenant})
-// - CertificateTenantResolver (mTLS Subject/SAN parsing)
+#### TenantResolverChain
 
-services.AddBseMultiTenancy(tenancy => {
-    tenancy.RequireTenantConsistency = true;  // CRITICAL — prevents spoofing
+`TenantResolverChain` walks the registered resolvers in DI registration order and returns the first non-null result. If all resolvers return `null`, it returns `TenantContext.Empty`:
 
-    tenancy.Resolvers.Add<ClaimTenantResolver>();      // Authoritative
-    tenancy.Resolvers.Add<HostTenantResolver>();       // Verified against claim
-    tenancy.Resolvers.Add<HeaderTenantResolver>();     // Verified against claim
+```csharp
+public sealed class TenantResolverChain
+{
+    public async ValueTask<ITenantContext> ResolveAsync(CancellationToken ct)
+    {
+        foreach (var resolver in _resolvers)
+        {
+            var context = await resolver.ResolveAsync(ct).ConfigureAwait(false);
+            if (context is null) continue;
 
-    tenancy.RequireTenant = true;
-    tenancy.AllowedHosts = ["*.bse.com"];
+            // Logs at Debug, EventId 5001 "TenantResolved",
+            // message: "Tenant '{TenantId}' resolved by {ResolverType}"
+            _logTenantResolved(_logger, context.TenantId, resolver.GetType().Name, null);
+
+            return context;
+        }
+        return TenantContext.Empty;
+    }
+}
+```
+
+The chain never returns `null`. Anonymous flows (no resolver matched) produce `TenantContext.Empty`, which the middleware may then accept or reject based on `BseMultiTenancyOptions.RequireTenant`.
+
+---
+
+### DI and Builder API
+
+```csharp
+// Entry point — returns IBseFrameworkBuilder for module-level chaining.
+IBseFrameworkBuilder AddBseMultiTenancy(
+    this IBseFrameworkBuilder builder,
+    Action<BseMultiTenancyBuilder>? configure = null);
+```
+
+`AddBseMultiTenancy` registers `ITenantContextAccessor` (singleton, `AsyncLocalTenantContextAccessor`), `BseMultiTenancyOptions` (via `AddOptions`), `BseMultiTenancyModule` (marker), and `TenantResolverChain` (singleton, registered after the configure callback so all resolver registrations are already in the container before the chain singleton resolves its `IEnumerable<ITenantResolver>` constructor argument).
+
+`BseMultiTenancyBuilder` is the fluent builder returned inside the configure callback:
+
+```csharp
+public sealed class BseMultiTenancyBuilder
+{
+    // Appends TResolver to the resolver chain. Registration order = priority.
+    // Uses AddSingleton (not TryAddSingleton) so multiple resolvers are preserved.
+    public BseMultiTenancyBuilder AddResolver<TResolver>()
+        where TResolver : class, ITenantResolver;
+
+    // Direct access for advanced scenarios.
+    public IServiceCollection Services { get; }
+}
+```
+
+A typical registration for an HTTP service that accepts both a header and a JWT claim:
+
+```csharp
+builder.Services
+    .AddBseFramework()
+    .AddBseMultiTenancy(mt =>
+    {
+        mt.AddHeaderResolver()   // reads X-Tenant-Id header
+          .AddClaimResolver();   // reads tenant_id JWT claim — runs second
+    });
+```
+
+---
+
+### Configuration
+
+`BseMultiTenancyOptions` governs enforcement behavior. It is bound from `IOptions<BseMultiTenancyOptions>` and is read by `TenantResolutionMiddleware`:
+
+```csharp
+public sealed class BseMultiTenancyOptions
+{
+    // When true, requests without a resolved tenant throw BseValidationException
+    // with field "tenant", error "required". Default: false (anonymous flows allowed).
+    public bool RequireTenant { get; set; }
+
+    // Optional allowlist. Empty = accept all tenants.
+    // Non-empty + resolved tenant not in list = BseValidationException "not allowed".
+    public IList<string> AllowedTenants { get; } = new List<string>();
+}
+```
+
+Configuration can be set inline via the builder or via `appsettings.json` under the `"MultiTenancy"` section:
+
+```json
+{
+  "MultiTenancy": {
+    "RequireTenant": true,
+    "AllowedTenants": ["acme", "globex", "initech"]
+  }
+}
+```
+
+---
+
+### ASP.NET Core: Middleware and Resolvers
+
+#### TenantResolutionMiddleware
+
+`TenantResolutionMiddleware` is added to the pipeline with `app.UseBseMultiTenancy()`. It must run **after** `app.UseAuthentication()` so that `ClaimTenantResolver` sees a populated `HttpContext.User`:
+
+```
+app.UseRouting()
+app.UseAuthentication()
+app.UseBseMultiTenancy()   // ← tenant is now in ITenantContextAccessor.Current
+app.UseAuthorization()
+app.MapControllers()
+```
+
+The middleware calls the resolver chain, validates the result, and scopes it for the lifetime of the request:
+
+```csharp
+public async Task InvokeAsync(
+    HttpContext context,
+    TenantResolverChain chain,
+    ITenantContextAccessor accessor,
+    IOptions<BseMultiTenancyOptions> options,
+    ILogger<TenantResolutionMiddleware>? logger = null)
+{
+    var tenantContext = await chain.ResolveAsync(context.RequestAborted);
+
+    // RequireTenant + no tenant  → BseValidationException("tenant", "required")
+    // AllowedTenants not empty + tenant not in list → BseValidationException("tenant", "not allowed")
+    ValidateTenantContext(tenantContext, options.Value);
+
+    using var scope = accessor.Push(tenantContext);
+    await _next(context);
+}
+```
+
+The `using var scope = accessor.Push(...)` pattern ensures the previous tenant context (typically `TenantContext.Empty`) is restored when the request completes, regardless of exceptions.
+
+#### Built-In HTTP Resolvers
+
+Three resolvers are shipped with `Bse.Framework.MultiTenancy.AspNetCore`. All depend on `IHttpContextAccessor` (auto-registered by the `AddHeaderResolver` / `AddHostResolver` / `AddClaimResolver` builder extensions).
+
+**HeaderTenantResolver** — reads a configurable HTTP header. Default: `X-Tenant-Id`.
+
+```csharp
+// Registration
+mt.AddHeaderResolver(opts => opts.HeaderName = "X-Tenant-Id");  // default
+```
+
+Returns `null` when the header is absent or empty.
+
+**HostTenantResolver** — extracts the tenant from the request hostname using two strategies in priority order:
+
+1. **Explicit map** — `HostTenantResolverOptions.HostToTenant` (case-insensitive dictionary). Takes priority over subdomain extraction.
+2. **Subdomain extraction** — strips a leading `www.` label, then returns the leftmost DNS label as the tenant. `localhost` and `BaseDomain` (default: `example.com`) are explicitly skipped (return `null`).
+
+```csharp
+mt.AddHostResolver(opts =>
+{
+    opts.BaseDomain = "bse.app";
+    opts.HostToTenant["app.bse.app"] = "admin";   // explicit override
 });
+// acme.bse.app        → "acme"
+// www.acme.bse.app    → "acme"  (www. stripped first)
+// bse.app             → null    (matches BaseDomain → pass to next resolver)
+// localhost            → null    (localhost → pass to next resolver)
 ```
 
-#### Cross-Check (Anti-Spoofing)
-
-When `RequireTenantConsistency=true`:
-1. `ClaimTenantResolver` runs FIRST (authenticated context)
-2. If other resolvers find a tenant, they MUST match
-3. Mismatch → `TenantSpoofingException` + audit event
-4. Anonymous requests can use header/host
-
-### Tenant Store
+**ClaimTenantResolver** — reads a JWT claim from `HttpContext.User`. Default claim type: `tenant_id` (the canonical claim emitted by `Bse.Framework.Auth.Jwt`).
 
 ```csharp
-public interface ITenantStore
+mt.AddClaimResolver(opts => opts.ClaimType = "tenant_id");  // default
+```
+
+Returns `null` when the claim is absent or when there is no `HttpContext` (e.g. in a background thread without a request).
+
+---
+
+### RPC Integration
+
+#### Identity Propagation: The Critical Rule
+
+Cross-process tenancy is carried in `TransportMessage.TenantId` and is restored into `ITenantContextAccessor` on the receiving side. Handlers read the active tenant from `ITenantContextAccessor.Current` — **not** from `IBseUser.CompCode`. Reading tenancy from the user accessor conflates the user's home tenant with the request's target tenant and fails in any cross-tenant admin scenario. This is the primary footgun the RPC integration exists to prevent.
+
+#### TenantOutgoingEnvelopeDecorator
+
+On the publisher side, `TenantOutgoingEnvelopeDecorator` implements `IRpcOutgoingEnvelopeDecorator` and stamps the current tenant onto the outbound envelope before it is encoded and written to the transport:
+
+```csharp
+public sealed class TenantOutgoingEnvelopeDecorator : IRpcOutgoingEnvelopeDecorator
 {
-    Task<TenantInfo?> GetByIdAsync(string tenantId, CancellationToken ct);
-    Task<TenantInfo?> GetByHostAsync(string host, CancellationToken ct);
-    Task<List<TenantInfo>> GetAllAsync(CancellationToken ct);
-    Task<TenantInfo> CreateAsync(TenantInfo tenant, CancellationToken ct);
-    Task UpdateAsync(TenantInfo tenant, CancellationToken ct);
-    Task DeleteAsync(string tenantId, CancellationToken ct);
+    public TransportMessage Decorate(TransportMessage envelope)
+    {
+        var current = _accessor.Current;
+
+        // Only stamp when a tenant is active AND the envelope does not already have one.
+        // The no-overwrite rule prevents callers from accidentally masking an explicitly
+        // assigned tenant id (e.g. in cross-tenant admin scenarios).
+        if (!current.HasTenant || envelope.TenantId is not null)
+            return envelope;
+
+        return envelope with { TenantId = current.TenantId };
+    }
 }
 ```
 
-Implementations:
-- `DatabaseTenantStore` (default) — tenants in master/catalog DB
-- `ConfigurationTenantStore` — tenants in appsettings (small deployments)
-- `CacheableTenantStore` — wraps any store with `IMemoryCache` (5min TTL)
+#### TenantRpcEnvelopeScope
 
-Cache invalidation on tenant updates via Redis pub/sub.
-
-### Hybrid Isolation Strategies
-
-```
-┌──────────────────┬─────────────────────────────────────┐
-│ Database         │ Each tenant has own database        │
-│                  │ Strongest isolation                  │
-│                  │ For: regulated, large, enterprise    │
-├──────────────────┼─────────────────────────────────────┤
-│ Schema           │ Single DB, schema per tenant         │
-│                  │ Moderate isolation (PostgreSQL)      │
-│                  │ For: medium tenants                  │
-├──────────────────┼─────────────────────────────────────┤
-│ Shared           │ Single DB, TenantId column           │
-│                  │ Soft isolation via query filters     │
-│                  │ + RLS at database layer              │
-│                  │ For: free tier, small tenants        │
-└──────────────────┴─────────────────────────────────────┘
-```
-
-Per-tenant decision stored in `TenantInfo.IsolationStrategy`. Application code is identical regardless of strategy.
-
-### Operational Limits
-
-Honest reality check based on connection pool math:
-
-| Tenant Count | Recommended Strategy |
-|---|---|
-| 1-50 | Database-per-tenant OK |
-| 50-200 | Schema-per-tenant + PgBouncer |
-| 200-2000 | Shared DB + RLS |
-| 2000+ | Cell-based deployment (sharded) |
-
-Database-per-tenant strategy:
-- Hard limit: ~50 tenants per Postgres host
-- Beyond 50: requires PgBouncer/Supavisor in transaction pooling mode
-- Even with PgBouncer: minimum one Postgres connection per tenant DB
-- Beyond 200 tenants per host: cell-based deployment required
-
-### Database Connection Routing
+On the consumer side, `TenantRpcEnvelopeScope` implements `IRpcEnvelopeScope` and pushes the inbound envelope's `TenantId` into the ambient accessor before the dispatcher resolves the handler. When the envelope carries no `TenantId`, a `NoOpDisposable` is returned and the accessor is left unchanged:
 
 ```csharp
-public interface ITenantConnectionResolver
+public sealed class TenantRpcEnvelopeScope : IRpcEnvelopeScope
 {
-    Task<string> GetConnectionStringAsync(string tenantId, CancellationToken ct);
-    Task<string> GetReadReplicaAsync(string tenantId, CancellationToken ct);
+    public IDisposable Push(TransportMessage envelope)
+    {
+        if (envelope.TenantId is null)
+            return NoOpDisposable.Instance;
+
+        var tenantContext = new TenantContext(
+            TenantId: envelope.TenantId,
+            Properties: new Dictionary<string, string>(0, StringComparer.Ordinal));
+
+        return _accessor.Push(tenantContext);
+    }
 }
 ```
 
-Per-request flow:
-1. Tenant resolved → `TenantInfo` loaded from store (cached)
-2. `ITenantConnectionResolver` returns connection string based on strategy
-3. `PooledDbContextFactory` checks out a context, sets connection
-4. After request: context returned to pool
+The dispatcher disposes the returned `IDisposable` in a `finally` block (LIFO order across all registered `IRpcEnvelopeScope` instances), restoring the previous tenant context after the handler completes.
 
-#### Connection Pool Safeguards
+#### Registration
 
-- Per-tenant pools with `MinPoolSize=0`, `ConnectionIdleLifetime=60s`
-- `MaxPoolSize=5-10` per tenant (defensive, not unlimited)
-- Framework-wide tenant pool budget with LRU eviction
-- Metric: `bse.data.connection_pool.active` per tenant
-- Warning: `bse.data.tenant_pools.budget_utilization > 80%`
+```csharp
+// Option A — chain off AddBseMultiTenancy:
+builder.Services
+    .AddBseFramework()
+    .AddBseMultiTenancy(mt => mt.AddRpcIntegration());
 
-### Defense in Depth — Four Layers
+// Option B — separate framework builder call:
+builder.Services
+    .AddBseFramework()
+    .AddBseMultiTenancy()
+    .AddBseMultiTenancyRpcIntegration();
+```
 
-#### Layer 1: EF Core Query Filters
+Both options register `TenantRpcEnvelopeScope` and `TenantOutgoingEnvelopeDecorator` as singletons. `AddBseMultiTenancy` must have been called before `AddBseMultiTenancyRpcIntegration` so that `ITenantContextAccessor` is already in the container.
+
+---
+
+### EF Core Isolation
+
+#### IMultiTenant Marker
+
+Entities that must be tenant-scoped implement `IMultiTenant`:
+
+```csharp
+// Bse.Framework.Data.Entities.IMultiTenant
+public interface IMultiTenant
+{
+    // Tenant identifier (slug). Non-nullable on the entity — every persisted
+    // row must have an owner. Contrast with ITenantContext.TenantId which is
+    // nullable to represent the anonymous / system context.
+    string TenantId { get; }
+}
+```
+
+#### MultiTenantQueryFilterConvention
+
+`MultiTenantQueryFilterConvention.Apply` is called from `BseDbContext.OnModelCreating` when a `ITenantContextAccessor` was provided to the context constructor. It adds a global query filter to every entity in the model that implements `IMultiTenant`:
+
+```csharp
+// Bse.Framework.Data.EntityFramework.Conventions (internal)
+public static void Apply(ModelBuilder modelBuilder, ITenantContextAccessor accessor)
+{
+    foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+    {
+        if (!typeof(IMultiTenant).IsAssignableFrom(entityType.ClrType)) continue;
+
+        // EF.Property<string>(e, "TenantId") == accessor.Current.TenantId
+        // The accessor is captured by reference — re-evaluated per query.
+        // When accessor.Current.TenantId is null (anonymous context), the
+        // filter becomes TenantId == null, which matches no production row
+        // (safe zero-row default rather than unsafe all-rows leakage).
+        modelBuilder.Entity(entityType.ClrType).HasQueryFilter(lambda);
+    }
+}
+```
+
+`BseDbContext.OnModelCreating` wires it up:
 
 ```csharp
 protected override void OnModelCreating(ModelBuilder modelBuilder)
 {
-    foreach (var entityType in modelBuilder.Model.GetEntityTypes())
-    {
-        if (typeof(IMultiTenant).IsAssignableFrom(entityType.ClrType))
-        {
-            // Apply tenant filter via reflection
-            var method = typeof(BseDbContext)
-                .GetMethod(nameof(SetTenantFilter), BindingFlags.NonPublic | BindingFlags.Instance)!
-                .MakeGenericMethod(entityType.ClrType);
-            method.Invoke(this, new object[] { modelBuilder });
-        }
-    }
-}
+    base.OnModelCreating(modelBuilder);
+    SoftDeleteQueryFilterConvention.Apply(modelBuilder);
 
-private void SetTenantFilter<T>(ModelBuilder mb) where T : class, IMultiTenant
-{
-    mb.Entity<T>().HasQueryFilter(e => e.TenantId == _tenant.TenantId);
+    if (_tenantAccessor is not null)
+        MultiTenantQueryFilterConvention.Apply(modelBuilder, _tenantAccessor);
 }
 ```
 
-Tenant filter is **NEVER removable** via application code. `IgnoreQueryFilters()` is not exposed in `IRepository<T>` or `Specification<T>`.
-
-#### Layer 2: SaveChangesInterceptor
+Subclasses pass the accessor through one of the three `BseDbContext` constructor overloads:
 
 ```csharp
-public class TenantInsertInterceptor : SaveChangesInterceptor
-{
-    public override ValueTask<InterceptionResult<int>> SavingChangesAsync(...)
+// Most common — multi-tenant with user identity stamping
+protected MyDbContext(
+    DbContextOptions<MyDbContext> options,
+    ISystemClock clock,
+    ITenantContextAccessor tenantAccessor,
+    IBseUserAccessor userAccessor)
+    : base(options, clock, tenantAccessor, userAccessor) { }
+```
+
+#### AuditingSaveChangesInterceptor — Tenant Enforcement
+
+The interceptor's tenant logic runs inside `SavingChanges` / `SavingChangesAsync` over every changed `IMultiTenant` entity:
+
+**On `EntityState.Added`**: if `TenantId` is null or empty on the entity, it is stamped from `accessor.Current.TenantId`. If both the entity and the current context have no tenant id, a `BseValidationException("tenant", "required")` is thrown — inserting a record with no owner would silently violate isolation invariants.
+
+**On `EntityState.Modified`**: if the entity's `TenantId` does not match the current context's `TenantId`, a `BseAuthorizationException` is thrown:
+
+```
+"Cross-tenant modification not allowed: entity belongs to tenant '{entity.TenantId}',
+current context is '{currentTenantId}'."
+```
+
+This is a defense-in-depth guard against a tracked entity from a prior tenant context leaking into the change tracker via `IgnoreQueryFilters()` or scope reuse. It is classified as an authorization failure (not a concurrency conflict) because retrying the same request would produce the same result.
+
+---
+
+### Data Flow
+
+#### HTTP Request Path
+
+```
+HTTP Request
+  │
+  ├─ UseAuthentication()    → HttpContext.User populated (JWT claims available)
+  │
+  ├─ UseBseMultiTenancy()  → TenantResolutionMiddleware
+  │     │
+  │     ├─ TenantResolverChain.ResolveAsync()
+  │     │     ├─ HeaderTenantResolver  (X-Tenant-Id header)?
+  │     │     ├─ HostTenantResolver    (subdomain)?
+  │     │     └─ ClaimTenantResolver   (tenant_id claim)?
+  │     │         first non-null wins → ITenantContext
+  │     │         all null → TenantContext.Empty
+  │     │
+  │     ├─ Validate RequireTenant + AllowedTenants
+  │     │     (BseValidationException on violation)
+  │     │
+  │     └─ using var scope = accessor.Push(tenantContext)
+  │           ITenantContextAccessor.Current = resolved tenant
+  │
+  ├─ Controller / Handler
+  │     │
+  │     └─ BseDbContext queries
+  │           EF query filter: WHERE TenantId = accessor.Current.TenantId
+  │           (evaluated at query time; null TenantId → zero rows)
+  │
+  └─ scope.Dispose()  → previous TenantContext (Empty) restored
+```
+
+#### RPC Cross-Process Path
+
+```
+Caller Process (tenant "acme" active in accessor)
+  │
+  ├─ IMessagePublisher.PublishAsync(stream, envelope)
+  │     │
+  │     └─ IRpcOutgoingEnvelopeDecorator(s) applied in order:
+  │           TenantOutgoingEnvelopeDecorator
+  │             HasTenant=true, envelope.TenantId=null
+  │             → envelope with { TenantId = "acme" }
+  │
+  └─ IRpcCodec.EncodeAsync → Redis XADD
+
+Consumer Process
+  │
+  ├─ IRpcCodec.DecodeAsync → TransportMessage(TenantId = "acme", ...)
+  │
+  ├─ RpcDispatcher.HandleAsync
+  │     │
+  │     ├─ IServiceScopeFactory.CreateAsyncScope()
+  │     │
+  │     ├─ IRpcEnvelopeScope(s) Push() in registration order:
+  │     │     TenantRpcEnvelopeScope.Push(envelope)
+  │     │       envelope.TenantId = "acme" → accessor.Push(TenantContext("acme"))
+  │     │       ITenantContextAccessor.Current = "acme"
+  │     │
+  │     ├─ IRpcInvocationFilter(s)
+  │     │
+  │     └─ Handler.HandleAsync(request, ct)
+  │           BseDbContext queries
+  │           EF query filter: WHERE TenantId = "acme"
+  │
+  └─ finally: scope.Dispose() → accessor restored to Empty
+              XACK
+```
+
+---
+
+### Security Considerations
+
+**Isolation default is zero rows, not all rows.** When `ITenantContextAccessor.Current.TenantId` is `null` (anonymous or system context), the EF query filter evaluates to `WHERE TenantId = NULL`, which returns no rows in SQL (NULL != NULL). This is intentional: an unauthenticated request or a misconfigured service fails closed rather than open.
+
+**Cross-tenant write guard is defense in depth.** The EF query filter prevents reading another tenant's rows. The `AuditingSaveChangesInterceptor` adds a second, independent check that prevents writing to an entity whose `TenantId` does not match the current context, even if a row somehow entered the change tracker through `IgnoreQueryFilters()` or a scope that was reused across request boundaries. A `BseAuthorizationException` is non-retryable.
+
+**No-overwrite rule on the outgoing decorator.** `TenantOutgoingEnvelopeDecorator` only writes `TransportMessage.TenantId` when the envelope field is `null`. An explicitly set `TenantId` (e.g. in a platform-admin cross-tenant operation) is preserved. This prevents the ambient tenant from masking intentional overrides.
+
+**Claim resolver ordering.** Callers that place `ClaimTenantResolver` last in the chain allow a request with a valid header but an invalid claim to resolve to the header value. For environments where the JWT claim is authoritative, `ClaimTenantResolver` should be registered first (first non-null wins) and the `AllowedTenants` allowlist should be used to restrict which tenants can be resolved at all.
+
+**`IBseUser.CompCode` is not the tenant.** The `CompCode` property on `IBseUser` represents the user's home company as recorded in the identity store. In a cross-tenant operation or a multi-hop RPC call, the user's `CompCode` may differ from the current request's tenant. Always read the active tenant from `ITenantContextAccessor.Current.TenantId`.
+
+**Suppressing the filter.** EF Core's `IgnoreQueryFilters()` is available but unguarded by the framework. No Roslyn analyzer enforces its usage. The `AuditingSaveChangesInterceptor` cross-tenant write guard remains active regardless of `IgnoreQueryFilters()` and provides the final safety net for write paths. Teams that call `IgnoreQueryFilters()` accept responsibility for the read-path isolation of those queries.
+
+---
+
+### Observability
+
+**Log event ids** — the multi-tenancy package occupies the range `5000–5099`:
+
+| EventId | Name | Level | Message |
+|---|---|---|---|
+| 5001 | `TenantResolved` | Debug | `Tenant '{TenantId}' resolved by {ResolverType}` |
+
+The `TenantResolved` log is emitted by `TenantResolverChain` via `LoggerMessage.Define` each time a resolver returns a non-null result. It records the winning resolver type so pipeline ordering issues are visible without attaching a debugger. Logs at `Information` or above are not emitted by the multi-tenancy package itself; enforcement failures surface as `BseValidationException` and `BseAuthorizationException` which the host's error-handling middleware converts to structured HTTP responses and RPC error codes.
+
+---
+
+### Testing Strategy
+
+Each package ships a dedicated test project:
+
+- **`Bse.Framework.MultiTenancy.Tests`** — unit tests covering `TenantContext` immutability, `AsyncLocalTenantContextAccessor` Push/Dispose isolation (including concurrent child tasks), `TenantResolverChain` first-wins ordering, DI registration uniqueness, and the module marker.
+- **`Bse.Framework.MultiTenancy.AspNetCore.Tests`** — unit tests per resolver (`HeaderTenantResolver`, `HostTenantResolver` with explicit map and subdomain extraction, `ClaimTenantResolver`), middleware `RequireTenant` + `AllowedTenants` enforcement, and the `UseBseMultiTenancy` application builder extension.
+- **`Bse.Framework.MultiTenancy.Rpc.Tests`** — unit tests for `TenantOutgoingEnvelopeDecorator` (no-overwrite rule, no-tenant no-op), `TenantRpcEnvelopeScope` (push with TenantId, `NoOpDisposable` when null), and DI registration via both extension method overloads.
+
+EF isolation testing is covered in `Bse.Framework.Data.EntityFramework.Tests` using the in-memory SQLite provider to verify query filter behaviour across anonymous, single-tenant, and cross-tenant insert/modify scenarios.
+
+---
+
+## Migration Path
+
+The following steps move a service from the legacy `CompCode`-parameter pattern to ambient multi-tenancy without a big-bang rewrite.
+
+**Step 1 — Add the package and wire the accessor.**
+
+```csharp
+builder.Services
+    .AddBseFramework()
+    .AddBseMultiTenancy(mt =>
     {
-        foreach (var entry in dbContext.ChangeTracker.Entries<IMultiTenant>())
-        {
-            if (entry.State == EntityState.Added)
-            {
-                // Auto-assign current tenant — developer never sets it
-                entry.Property(nameof(IMultiTenant.TenantId)).CurrentValue = _tenant.TenantId;
-            }
-            else if (entry.State == EntityState.Modified)
-            {
-                // SECURITY: prevent tenant ID tampering
-                if (entry.OriginalValues[nameof(IMultiTenant.TenantId)] != _tenant.TenantId)
-                {
-                    throw new CrossTenantViolationException(...);
-                }
-            }
-        }
-    }
+        mt.AddClaimResolver();   // or AddHeaderResolver() for service-to-service
+    });
+
+// In app pipeline:
+app.UseAuthentication();
+app.UseBseMultiTenancy();
+```
+
+`RequireTenant` remains `false` (default), so existing anonymous flows are unaffected.
+
+**Step 2 — Replace `CompCode` reads with `ITenantContextAccessor.Current.TenantId`.**
+
+Before:
+```csharp
+public async Task<Invoice> GetInvoiceAsync(string compCode, Guid id, CancellationToken ct)
+{
+    var invoice = await _db.Invoices
+        .Where(i => i.CompCode == compCode && i.Id == id)
+        .FirstOrDefaultAsync(ct);
+    // ...
 }
 ```
 
-#### Layer 3: Roslyn Analyzer
-
-Compile-time enforcement:
-- `BSE0004 ERROR`: `IgnoreQueryFilters()` call outside `BseUnfilteredDbContext`
-- `BSE0010 ERROR`: Direct `_dbContext.Set<T>()` access in tenant-scoped service (must use `IRepository<T>`)
-- `BSE0011 ERROR`: Manual `WHERE TenantId = ...` clause in `[Query]` SQL (use RLS instead)
-
-#### Layer 4: PostgreSQL Row-Level Security (CRITICAL)
-
-Why Layer 4 is critical:
-- **Dapper bypasses EF Core query filters entirely**
-- DBA queries during incidents bypass application code
-- Future code paths added without tenant awareness still safe
-- SOC 2 / HIPAA auditors strongly prefer database-level enforcement
-
-Implementation:
-
-```sql
--- One-time migration per multi-tenant table:
-ALTER TABLE Students ENABLE ROW LEVEL SECURITY;
-ALTER TABLE Students FORCE ROW LEVEL SECURITY;  -- applies even to table owner
-
-CREATE POLICY tenant_isolation ON Students
-  USING (TenantId = current_setting('app.current_tenant_id')::text);
+After:
+```csharp
+public async Task<Invoice> GetInvoiceAsync(Guid id, CancellationToken ct)
+{
+    // accessor.Current.TenantId is set by middleware or by TenantRpcEnvelopeScope
+    // EF query filter WHERE TenantId = accessor.Current.TenantId is applied automatically
+    var invoice = await _db.Invoices
+        .Where(i => i.Id == id)
+        .FirstOrDefaultAsync(ct);
+    // ...
+}
 ```
 
-On every connection acquisition (both EF Core and Dapper):
-```sql
-SET app.current_tenant_id = @currentTenant;
-```
-
-For cross-tenant operations:
-```sql
-RESET app.current_tenant_id;
--- Connection runs as privileged role (audited)
-```
-
-Performance: 1-3% overhead (profiled in Crunchy Data benchmarks).
-
-SQL Server equivalent:
-```sql
-CREATE SECURITY POLICY TenantPolicy
-  ADD FILTER PREDICATE dbo.fn_TenantPredicate(TenantId) ON Students
-  WITH (STATE = ON);
-```
-
-### Per-Tenant Options Pattern (Finbuckle-Style)
-
-The framework's most distinctive feature — adopted from Finbuckle.MultiTenant:
+**Step 3 — Opt the DbContext into multi-tenant query filters.**
 
 ```csharp
-services.AddBseMultiTenancy(tenancy => {
-    tenancy.PerTenantOptions<JwtBearerOptions>((options, tenantInfo) => {
-        options.Authority = tenantInfo.Properties["IssuerUrl"]?.ToString();
-    });
+public class InvoiceDbContext : BseDbContext
+{
+    public InvoiceDbContext(
+        DbContextOptions<InvoiceDbContext> options,
+        ISystemClock clock,
+        ITenantContextAccessor tenantAccessor,
+        IBseUserAccessor userAccessor)
+        : base(options, clock, tenantAccessor, userAccessor) { }
 
-    tenancy.PerTenantOptions<RedisStreamsOptions>((options, tenantInfo) => {
-        if (tenantInfo.Tier == TenantTier.Enterprise)
-            options.StreamPrefix = $"tenant:{tenantInfo.Id}:";
-    });
+    public DbSet<Invoice> Invoices => Set<Invoice>();
+}
+```
 
-    tenancy.PerTenantOptions<EmailOptions>((options, tenantInfo) => {
-        options.FromAddress = tenantInfo.Properties["FromEmail"]?.ToString();
-        options.SmtpServer = tenantInfo.Properties["SmtpServer"]?.ToString();
-    });
+Mark `Invoice` with `IMultiTenant` and add a `TenantId` column in a migration. The query filter and auto-stamp are now active.
+
+**Step 4 — Add RPC integration for cross-service flows.**
+
+```csharp
+.AddBseMultiTenancy(mt =>
+{
+    mt.AddClaimResolver()
+      .AddRpcIntegration();   // stamps outgoing + restores inbound
 });
 ```
 
-Any framework or third-party library that uses `IOptions<T>` automatically becomes tenant-aware.
+Remove all `CompCode` parameters from RPC request types. The tenant now travels in `TransportMessage.TenantId` and is available in handler code via `ITenantContextAccessor.Current.TenantId`.
 
-### Sub-Tenants / Organizations / Workspaces
+**Step 5 — Enforce tenant requirement.**
 
-First-class hierarchy: Tenant → Organization → Workspace (replaces implicit `BranchId`):
+Once all callers are producing a tenant context, flip the option:
 
-```csharp
-public interface IOrganizationScoped : IMultiTenant
-{
-    string OrganizationId { get; }
-}
-
-public interface IWorkspaceScoped : IOrganizationScoped
-{
-    string WorkspaceId { get; }
-}
+```json
+{ "MultiTenancy": { "RequireTenant": true } }
 ```
 
-Query filters cascade:
-```
-IMultiTenant       → WHERE TenantId = @t
-IOrganizationScoped → WHERE TenantId = @t AND OrganizationId = @o
-IWorkspaceScoped    → WHERE TenantId = @t AND OrganizationId = @o AND WorkspaceId = @w
-```
+Requests that arrive without a resolvable tenant now fail fast at the middleware with a `BseValidationException` rather than silently accessing zero rows.
 
-Permission model respects hierarchy:
-- `Tenant.Admin` → can do anything in tenant
-- `Organization.Admin` → can do anything in organization
-- `Workspace.Admin` → can do anything in workspace
-- `Workspace.Member` → can do limited things in workspace
+---
 
-User can belong to multiple workspaces in multiple organizations. JWT carries: `tenant`, `allowed_organizations[]`, `allowed_workspaces[]`, `current_active`.
+## Open Questions
 
-### Cross-Tenant Operations (Platform Admin)
+**Physical isolation (database-per-tenant / schema-per-tenant).** The current implementation is shared-database only, with isolation enforced at the application layer. For regulated environments (SOC 2, HIPAA) or very large tenants, physical isolation is materially stronger. The `ITenantContextAccessor` abstraction is isolation-strategy-agnostic — a future `IDbContextFactory<T>` that routes to a per-tenant connection string could sit below `BseDbContext` without changing handler or repository code. The design decision is open: whether to build this in-house or to adopt a package such as Finbuckle.MultiTenant as the connection-routing layer.
 
-```csharp
-public interface ICrossTenantContext
-{
-    Task<T> ExecuteInTenantAsync<T>(string tenantId, Func<Task<T>> operation);
-    Task ExecuteAcrossTenantsAsync(Func<TenantInfo, Task> operation, bool parallel = false);
-}
+**Per-tenant `IOptions<T>`.** Finbuckle.MultiTenant's `PerTenantOptions` extension replaces the `IOptionsSnapshot<T>` singleton with a per-tenant-resolved snapshot, enabling per-tenant JWT issuers, SMTP servers, or feature flags. This is not yet implemented. The hook would be at the `BseMultiTenancyBuilder` level: `mt.PerTenantOptions<TOptions>((opts, ctx) => { ... })`. The ambient `ITenantContextAccessor` is already in place to support this.
 
-public class PlatformAdminService
-{
-    [RequirePermission("Platform.Admin")]
-    public async Task GenerateGlobalReport()
-    {
-        await _crossTenant.ExecuteAcrossTenantsAsync(async tenant => {
-            // Code runs in each tenant's context
-            // Filters apply per-tenant
-            var students = await _studentRepo.GetAllAsync();
-        });
-    }
-}
-```
+**PostgreSQL Row-Level Security.** The EF query filter is bypassed by raw Dapper queries, by DBA sessions, and by any code path that calls `context.Database.ExecuteSqlRaw`. PostgreSQL RLS (`ALTER TABLE ... ENABLE ROW LEVEL SECURITY; CREATE POLICY ... USING (TenantId = current_setting('app.current_tenant_id'))`) enforces isolation at the database engine and is immune to application-layer bypass. The `SET app.current_tenant_id = @t` session variable would need to be issued on every connection checkout from the pool. This is a strengthening step, not a replacement for the application-layer filter; both layers can coexist.
 
-Audit:
-- Every cross-tenant operation logged
-- `audit.tenant.cross_tenant_access` event
-- Real user, target tenants, operation, duration
-- Alert configured for unusual patterns
+**Noisy-neighbor isolation.** Tenant traffic currently shares a single Redis stream per service. A high-throughput free-tier tenant can starve paid tenants. Per-tier or per-tenant stream namespacing (e.g. `bse.rpc.{service}.{tier}.requests`) is a transport-level extension and does not require any changes to the multi-tenancy abstractions.
 
-### Tenant Impersonation (Distinct from Cross-Tenant)
-
-See RFC-0004 for full details. Key distinction:
-
-| Cross-Tenant Ops | Impersonation |
-|---|---|
-| Identity = admin only | Identity = support engineer + tenant user |
-| Automated/scripted | Interactive |
-| No customer approval | Customer-approvable |
-| Maintenance/reporting | "See what tenant sees" |
-
-### Tenant Context in RPC
-
-Tenant flows through `TransportMessage.Auth` automatically:
-
-```
-Service A (tenant-a request):
-  ICurrentUser.TenantId = "tenant-a"
-  → RPC call to billing service
-  → tenant in JWT in TransportMessage.Auth
-
-Service B (billing):
-  AuthContextMiddleware extracts tenant
-  ITenantContext.TenantId = "tenant-a"
-  All queries automatically filtered to tenant-a
-```
-
-### Tenant Context in Background Jobs
-
-```csharp
-public class ReportGenerationJob : IBackgroundJob
-{
-    public async Task ExecuteAsync(JobContext ctx)
-    {
-        // Tenant captured at scheduling time
-        await using var scope = await _tenantManager.SetTenantAsync(ctx.TenantId);
-
-        // ITenantContext returns ctx.TenantId
-        // All queries scoped to that tenant
-        await GenerateReport();
-    }
-}
-```
-
-### Tenant-Scoped Services
-
-```csharp
-services.AddBseMultiTenancy(tenancy => {
-    tenancy.AddTenantScoped<ITenantConfigService, TenantConfigService>();
-});
-```
-
-Resolved per-tenant:
-- First request for tenant A → instance created, cached
-- Subsequent requests for tenant A → same instance
-- First request for tenant B → new instance for tenant B
-- Cache evicted when tenant suspended/deleted
-
-### Tenant-Aware Caching (CRITICAL)
-
-Mandatory key prefixing — wrapper, not developer discipline:
-
-```csharp
-public interface ITenantAwareCache
-{
-    Task<T?> GetAsync<T>(string key, CancellationToken ct);
-    Task SetAsync<T>(string key, T value, TimeSpan ttl, CancellationToken ct);
-    Task RemoveAsync(string key, CancellationToken ct);
-    Task RemoveAllForTenantAsync(string tenantId, CancellationToken ct);
-}
-```
-
-Implementation prefixes ALL keys:
-```
-cache.GetAsync("user:123") → Redis key: "t:tenant-a:user:123"
-```
-
-Roslyn analyzer FORBIDS direct `IDistributedCache` injection in tenant-scoped services:
-> Compile error: "Use ITenantAwareCache in tenant-scoped services to prevent cache leaks"
-
-Tenant lifecycle integration:
-```csharp
-public class CacheEvictionHandler : INotificationHandler<TenantSuspendedEvent>
-{
-    public async Task HandleAsync(TenantSuspendedEvent evt)
-    {
-        await _cache.RemoveAllForTenantAsync(evt.TenantId);
-    }
-}
-```
-
-Per-tenant cache size limits:
-- Free tier: 10MB max per tenant
-- Pro tier: 100MB max per tenant
-- Enterprise: unlimited
-
-### Tenant Provisioning Pipeline
-
-```csharp
-public interface ITenantProvisioner
-{
-    Task<TenantInfo> ProvisionAsync(ProvisionRequest request, CancellationToken ct);
-}
-
-public class TenantProvisioner : ITenantProvisioner
-{
-    public async Task<TenantInfo> ProvisionAsync(ProvisionRequest req, CancellationToken ct)
-    {
-        // 1. Validate (tenant ID unique, host not taken, etc.)
-        await _validator.ValidateAsync(req);
-
-        // 2. Create tenant record (status = Provisioning)
-        var tenant = await _store.CreateAsync(new TenantInfo {
-            Status = TenantStatus.Provisioning, ...
-        });
-
-        // 3. Provision database (if Database isolation strategy)
-        if (tenant.IsolationStrategy == "Database")
-        {
-            await _dbProvisioner.CreateDatabaseAsync(tenant);
-            await _migrator.MigrateAsync(tenant.ConnectionString);
-        }
-
-        // 4. Seed initial data (admin user, default roles)
-        await _seeder.SeedAsync(tenant);
-
-        // 5. Configure observability (Mimir tenant, Loki tenant)
-        await _observabilityProvisioner.RegisterTenantAsync(tenant);
-
-        // 6. Activate
-        tenant.Status = TenantStatus.Active;
-        await _store.UpdateAsync(tenant);
-
-        // 7. Audit
-        await _auditLogger.LogAsync("tenant.provisioned", new { tenant.Id });
-
-        return tenant;
-    }
-}
-```
-
-### Tenant Migration Runner
-
-```csharp
-public interface ITenantMigrationRunner
-{
-    Task<MigrationReport> MigrateAllAsync(MigrationOptions options, CancellationToken ct);
-    Task<MigrationReport> MigrateTenantAsync(string tenantId, CancellationToken ct);
-    Task<DriftReport> DetectDriftAsync(CancellationToken ct);
-}
-
-public class MigrationOptions
-{
-    public int Parallelism { get; set; } = 10;
-    public bool ContinueOnError { get; set; } = true;
-    public TimeSpan PerTenantTimeout { get; set; } = TimeSpan.FromMinutes(5);
-    public bool DryRun { get; set; } = false;
-    public string[]? OnlyTenants { get; set; }
-    public string[]? ExcludeTenants { get; set; }
-    public bool CanaryFirst { get; set; } = true;  // 1% canary then full rollout
-}
-```
-
-Per-tenant state in `tenant_migrations` table:
-- Skips already-migrated tenants on restart
-- Per-tenant advisory lock prevents concurrent migration
-- Schema drift audit endpoint compares tenant DBs to target schema
-- Forward-only philosophy (Flyway-style)
-- Expand/contract for breaking changes
-
-### Tenant Migration Between Strategies
-
-When tenant grows from Free to Enterprise:
-```
-Free (shared DB) → Enterprise (database-per-tenant)
-```
-
-Migration process:
-1. Provision new database for tenant
-2. Schema migrate
-3. Copy tenant rows from shared DB to new DB (online, batched)
-4. Verify row counts match
-5. Update `TenantInfo.IsolationStrategy = "Database"`
-6. Update `TenantInfo.ConnectionString`
-7. Schema cache invalidation (Redis pub/sub)
-8. Background: delete tenant rows from shared DB after grace period
-
-Reverse migration (consolidation) supported similarly.
-
-### Deployment Cells (Multi-Region)
-
-```
-┌──────────────────────────────────────────────┐
-│   Global Tenant Routing Service              │
-│   (DNS/edge: Cloudflare Workers, Front Door) │
-│   Maps: tenant_id → cell_url                 │
-└────────────┬─────────────────────────────────┘
-             │
-     ┌───────┼───────┬───────┬───────┐
-     ▼       ▼       ▼       ▼       ▼
-  ┌──────┐┌──────┐┌──────┐┌──────┐┌──────┐
-  │Cell 1││Cell 2││Cell 3││Cell 4││Cell 5│
-  │ EU-W ││ EU-W ││ US-E ││ US-W ││ AP-S │
-  │t1-50 ││t51-99││t100..││t150..││t200..│
-  └──────┘└──────┘└──────┘└──────┘└──────┘
-```
-
-Each cell:
-- Own database cluster
-- Own Redis cluster
-- Own observability stack (or shared with `X-Scope-OrgID`)
-- Own KMS/Key Vault (region-pinned for data residency)
-- ~50-200 tenants per cell
-
-GDPR data residency enforcement:
-- EU tenants pinned to EU cells, NEVER processed in US/AP
-- Background jobs scheduled to region-pinned queues
-- Cross-region writes throw `RegionViolationException`
-- Encryption keys per region in regional KMS
-
-Cross-region failover:
-- Active-passive per cell with async replication to paired region
-- RPO: ~minutes
-- RTO: ~minutes
-
-### GDPR-Compliant Tenant Deletion
-
-```
-Active → Suspended → Offboarding → PendingDeletion → Deleted
-```
-
-| State | Behavior |
-|---|---|
-| Active | Normal operation |
-| Suspended | Read-only (billing issue), data preserved |
-| Offboarding | No access, 30-day grace period for data export |
-| PendingDeletion | Grace period elapsed, scheduled for hard delete |
-| Deleted | Crypto-shredded or DB-dropped, only audit trail remains |
-
-Hard deletion process:
-
-**Database-per-tenant:**
-1. Verify tenant in `PendingDeletion` state past grace period
-2. Final data export available for audit
-3. `DROP DATABASE tenant_xxx;`
-4. Remove tenant record from catalog
-5. Audit: `tenant.deleted` event
-
-**Shared DB (crypto-shredding):**
-1. Each tenant's data encrypted with per-tenant DEK
-2. DEK stored in KMS keyed by tenant ID
-3. Deletion = destroy DEK in KMS
-4. Encrypted data on disk becomes unrecoverable
-5. Background job sweeps unrecoverable rows over time
-6. Audit: `tenant.crypto_shredded` event
-
-**Backups:**
-- Documented retention (30 days default)
-- Restore from backup re-triggers deletion automatically
-
-**Pre-deletion data export (GDPR Article 20):**
-```csharp
-public interface ITenantExporter
-{
-    Task<string> ExportAsync(string tenantId, CancellationToken ct);
-    // Returns: secure download URL with short TTL
-}
-```
-
-### Tenant Quotas
-
-```csharp
-public class TenantQuota
-{
-    public int MaxUsers { get; set; }
-    public long MaxStorageBytes { get; set; }
-    public int MaxApiCallsPerHour { get; set; }
-    public int MaxConcurrentSessions { get; set; }
-    public int MaxBackgroundJobsPerDay { get; set; }
-}
-```
-
-Enforcement points:
-- Auth: rate limiting per tenant
-- Data: storage usage tracked, blocked when over quota
-- RPC: per-tenant request rate limiting
-- Background jobs: queue depth check before scheduling
-- Sessions: `ISessionManager` enforces concurrent limit
-
-Metrics:
-```
-bse.tenant.quota.users.used / bse.tenant.quota.users.limit
-bse.tenant.quota.storage.used / bse.tenant.quota.storage.limit
-```
-
-### Tenant Lifecycle Events
-
-```csharp
-public record TenantProvisionedEvent(string TenantId, DateTime ProvisionedAt) : IDomainEvent;
-public record TenantActivatedEvent(string TenantId) : IDomainEvent;
-public record TenantSuspendedEvent(string TenantId, string Reason) : IDomainEvent;
-public record TenantOffboardingEvent(string TenantId, DateTime GracePeriodEndsAt) : IDomainEvent;
-public record TenantDeletedEvent(string TenantId, DateTime DeletedAt) : IDomainEvent;
-public record TenantUpgradedEvent(string TenantId, TenantTier From, TenantTier To) : IDomainEvent;
-```
-
-### Per-Tenant Streams (Noisy Neighbor Defense)
-
-Redis Streams per tenant tier (not per individual tenant):
-```
-rpc.enterprise:{service}:{method}     ← Enterprise tier traffic
-rpc.pro:{service}:{method}            ← Pro tier traffic
-rpc.free:{service}:{method}           ← Free tier traffic
-```
-
-Free-tier flood cannot starve Enterprise traffic.
-
-### MultiTenancySides (ABP Pattern)
-
-```csharp
-public enum MultiTenancySides
-{
-    Host = 1,    // Cross-tenant only
-    Tenant = 2,  // Within a tenant context only
-    Both = 3
-}
-
-[MultiTenancySide(MultiTenancySides.Host)]
-public class PlatformAdminService { }
-
-[MultiTenancySide(MultiTenancySides.Tenant)]  // default
-public class StudentService { }
-```
-
-Startup validation:
-- Host services CANNOT depend on tenant-side entities
-- Tenant services CANNOT depend on host-only data
-- Catches mistakes at startup
-
-### Multi-Tenancy in Telemetry
-
-(See RFC-0005 for details.)
-
-- `tenant_tier` as bounded label (Free/Pro/Enterprise)
-- Per-tenant via Mimir `X-Scope-OrgID` (NOT vanilla Prometheus)
-- `tenant.id` in span attributes (Tempo)
-- `tenant.id` in structured metadata (Loki, NOT label)
-- Cost attribution via `count_connector`
-
-### Migration from Existing Apps
-
-Stud2/SafePack2/Orange2 already have multi-tenancy via `CompCode`/`BranchCode`:
-
-| Current | Framework |
-|---|---|
-| `CompCode` | `TenantInfo.Id` |
-| `BranchCode` | `TenantInfo.OrganizationId` |
-| Year DB | `TenantInfo.ConnectionString` (varies by year) |
-
-#### Phase 1: Adopt framework, keep existing connection logic
-- `ITenantContext` returns `CompCode` as `TenantId`
-- `ITenantConnectionResolver` returns existing dynamic connection string
-- Application code unchanged
-
-#### Phase 2: Move tenant config to tenant store
-- Tenants migrated to tenant catalog DB
-- Resolution moves from request params to JWT claims
-- `CompCode` parameter removed from controller signatures
-
-#### Phase 3: Apply isolation strategies
-- Large tenants → database-per-tenant
-- Small tenants → consolidate to shared DB
-- Tenant filters applied automatically
-
-## Future Work
-
-### Reseller Hierarchy (B2B2B)
-- Reseller → owns multiple Tenants
-- Visibility across owned tenants
-- Billing rolled up to Reseller
-- Per-Reseller branding cascades
-
-### Tenant Federation
-- Two tenants explicitly consent to share specific data
-- Federation contract (audited by both sides)
-- Different from impersonation (consent-based)
-
-### User-to-Multiple-Tenants
-- Single user identity belongs to multiple tenants (Slack/Notion model)
-- JWT carries: `allowed_tenants[] + active_tenant`
-- Tenant switcher in UI without re-login
+---
 
 ## References
 
-- ADR-0006
-- Finbuckle.MultiTenant: https://www.finbuckle.com/MultiTenant
-- ABP Framework multi-tenancy
-- AWS PostgreSQL RLS for Multi-Tenant
-- AWS Deployment Stamps Pattern
-- AWS SaaS Tenant Isolation Strategies whitepaper
+- [Finbuckle.MultiTenant](https://www.finbuckle.com/MultiTenant) — prior art for ambient tenant context, per-tenant options, and the resolver chain pattern
+- [Microsoft SaaS Tenant Isolation Guidance (Azure)](https://learn.microsoft.com/en-us/azure/architecture/guide/multitenant/considerations/tenant-isolation)
+- [AWS SaaS Tenant Isolation Strategies whitepaper](https://docs.aws.amazon.com/whitepapers/latest/saas-tenant-isolation-strategies/saas-tenant-isolation-strategies.html)
+- [PostgreSQL Row Security Policies](https://www.postgresql.org/docs/current/ddl-rowsecurity.html)
+- [EF Core Global Query Filters](https://learn.microsoft.com/en-us/ef/core/querying/filters)
+- [AsyncLocal&lt;T&gt; propagation semantics](https://learn.microsoft.com/en-us/dotnet/api/system.threading.asynclocal-1)
+- ADR-0006: Multi-Tenancy Architecture Decision
+- RFC-0001: Framework Overview and In-Memory Testing Rig
+- RFC-0003: Data Access Layer
+- RFC-0004: Auth and Security

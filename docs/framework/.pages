@@ -3,4 +3,3 @@ nav:
   - Overview: index.md
   - RFCs: rfc
   - ADRs: adr
-  - Plans: plans
